@@ -1,0 +1,892 @@
+import { config as loadDotenv } from 'dotenv';
+import { z } from 'zod';
+import { normalizeTradingAsset, TRADING_ASSET_PRESETS } from './config/asset-presets';
+import { parseCorrelationSymbolGroups } from './strategy/correlation-guard';
+
+// 1. Load persistent secrets (API keys, Telegram IDs)
+loadDotenv({ path: '.env.secrets' });
+// 2. Load mode-specific config (templates copied to .env)
+loadDotenv();
+
+export type { TradingAsset } from './config/asset-presets';
+
+const BinanceProduct = z.enum(['usdm', 'usdm_demo', 'spot']);
+const ExecutionModeEnum = z.enum(['paper', 'live']);
+
+const numFromString = (def: number) =>
+  z
+    .union([z.number(), z.string()])
+    .default(def)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseFloat(v)))
+    .pipe(z.number().finite());
+
+const boolFromString = (def: boolean) =>
+  z
+    .union([z.boolean(), z.string()])
+    .default(def)
+    .transform((v) => (typeof v === 'boolean' ? v : v.toLowerCase() === 'true'));
+
+/** Treat empty string as unset so `KEY=` lines work in `.env`. */
+const emptyToUndefined = (v: unknown): unknown =>
+  v === '' || v === undefined || v === null ? undefined : v;
+
+export const AppConfigSchema = z.object({
+  /**
+   * Primary control: `sol` | `eth` | `btc` sets `BINANCE_SYMBOL` + `COINDCX_PAIR` automatically.
+   * Use `custom` with explicit `BINANCE_SYMBOL` and `COINDCX_PAIR` in env for other markets.
+   */
+  TRADING_ASSET: z
+    .string()
+    .default('sol')
+    .transform((s) => normalizeTradingAsset(s)),
+  /**
+   * `usdm` — live USD-M REST `fapi.binance.com` (or testnet when `BINANCE_FUTURES_TESTNET=true`).
+   * `usdm_demo` — Binance **demo** USD-M REST `demo-fapi.binance.com` (virtual balances; not mainnet).
+   * `spot` — spot market.
+   */
+  BINANCE_PRODUCT: BinanceProduct.default('usdm'),
+  BINANCE_REST_BASE: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  BINANCE_WS_BASE: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  BINANCE_SYMBOL: z.string().min(1).default('SOLUSDT'),
+  /**
+   * Extra Binance USD-M symbols (comma-separated) for the shared multiplex feed + dashboard watchlist.
+   * `BINANCE_SYMBOL` remains the execution / strategy primary and is always subscribed first.
+   * Example: `ETHUSDT,BTCUSDT` with primary SOLUSDT → SOL + ETH + BTC on one stream.
+   */
+  BINANCE_WATCHLIST: z
+    .string()
+    .default('ETHUSDT,BTCUSDT,XRPUSDT')
+    .transform((s) =>
+      [...new Set(s.split(',').map((p) => p.trim().toUpperCase()).filter((p) => p.length > 0))],
+    ),
+  BINANCE_KLINE_INTERVAL: z.string().default('15m'),
+  BINANCE_HTF_INTERVAL: z.string().default('1h'),
+  COINDCX_API_KEY: z.string().default(''),
+  COINDCX_API_SECRET: z.string().default(''),
+  API_BASE_URL: z.string().url().default('https://api.coindcx.com'),
+  PUBLIC_BASE_URL: z.string().url().default('https://public.coindcx.com'),
+  COINDCX_PAIR: z.string().min(1).default('B-SOL_USDT'),
+  READ_ONLY: z
+    .string()
+    .default('true')
+    .transform((s) => s.toLowerCase() !== 'false'),
+
+  /**
+   * Master switch for `PositionManager` → execution adapter (paper or live).
+   * Default **true**: with **`EXECUTION_MODE=paper`** (default), fills are **simulated locally** — no CoinDCX order API and no Binance trading API.
+   * Set **false** for signals-only (no paper positions). Live exchange orders still require **`EXECUTION_MODE=live`**, **`READ_ONLY=false`**, and API keys.
+   * Legacy: `EXECUTION_ENABLED` is honored if `PLACE_ORDER` is unset.
+   */
+  PLACE_ORDER: z.preprocess((val: unknown) => {
+    if (val !== undefined && val !== '') return val;
+    if (process.env.PLACE_ORDER !== undefined && process.env.PLACE_ORDER !== '') return process.env.PLACE_ORDER;
+    if (process.env.EXECUTION_ENABLED !== undefined && process.env.EXECUTION_ENABLED !== '') {
+      return process.env.EXECUTION_ENABLED;
+    }
+    return 'true';
+  }, boolFromString(true)),
+
+  /**
+   * Global shadow mode: connect to live data but suppress all order placement at the adapter level.
+   * Unlike `READ_ONLY`, shadow mode still runs the full signal/strategy pipeline and logs what
+   * would have been sent — useful for pre-deployment validation against real market conditions.
+   * Do not enable on an account with unmanaged live positions (closes would not hit the exchange).
+   */
+  SHADOW_MODE: boolFromString(false),
+
+  /** Seconds between heartbeat logs (mark + biases). 0 = disable. */
+  LOG_HEARTBEAT_SEC: z
+    .string()
+    .optional()
+    .default('60')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 0) return 60;
+      return Math.min(3600, n);
+    }),
+
+  /** After WS open, warn if no LTP/mark yet (seconds). 0 = disable. */
+  LTP_CONNECT_WARN_SEC: z
+    .string()
+    .optional()
+    .default('15')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 0) return 15;
+      return Math.min(120, n);
+    }),
+
+  /**
+   * USD-M only: poll `GET /fapi/v1/premiumIndex` for mark/LTP when WS is silent.
+   * 0 = disable (WS only). Default 5s — REST often works when `fstream` push is blocked.
+   */
+  USDM_MARK_REST_POLL_SEC: z
+    .string()
+    .optional()
+    .default('5')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 0) return 5;
+      return Math.min(600, n);
+    }),
+
+  LEVERAGE: numFromString(10),
+  /**
+   * Hard cap on entry **notional** (USDT contract face ≈ price × qty). 0 = disabled.
+   * Applied after margin/leverage sizing; e.g. `50` during first live week (see TODO Phase 4).
+   */
+  MAX_NOTIONAL_USDT: numFromString(0),
+  /**
+   * USDT margin per trade for Binance USDT-M Futures (preferred).
+   * When set to a positive value, overrides the INR-based sizing path.
+   * Example: 200 USDT margin × 10× leverage = 2000 USDT notional.
+   */
+  CAPITAL_PER_TRADE_USDT: numFromString(0),
+  CAPITAL_PER_TRADE: numFromString(20000),
+  CAPITAL_PER_TRADE_INR: numFromString(20000),
+  INR_PER_USDT: numFromString(85),
+  /** Live INR/USDT FX rate source: `binance` (USDTINR), `coindcx` (USDTINR), or `fixed` (use INR_PER_USDT). */
+  INR_RATE_SOURCE: z
+    .union([z.enum(['binance', 'coindcx', 'fixed']), z.string()])
+    .default('coindcx')
+    .transform((v) => {
+      const s = String(v).toLowerCase();
+      return s === 'coindcx' || s === 'fixed' ? s : 'binance';
+    })
+    .pipe(z.enum(['binance', 'coindcx', 'fixed'])),
+  /** Seconds between INR/USDT FX rate polls (min 15 enforced at runtime). */
+  INR_RATE_REFRESH_SEC: numFromString(300),
+  TARGET_PNL_PCT: numFromString(0.10),
+  STOP_LOSS_PCT: numFromString(0.05),
+  /** Take-profit distance as underlying price move (default 1.5% capture profile). */
+  TP_PRICE_PCT: numFromString(0.015),
+  /** Stop-loss distance as underlying price move. */
+  SL_PRICE_PCT: numFromString(0.01),
+  MIN_CONFIDENCE: numFromString(0.65),
+  MIN_SMC_SCORE: numFromString(2),
+  TAKER_FEE: numFromString(0.0005),
+  MAKER_FEE: numFromString(0.0002),
+  FUNDING_FEE_EST: numFromString(0.0001),
+  /**
+   * Round-trip fee buffer subtracted from gross price-PnL% before comparing
+   * against any exit target (trail activation, watermark, TP ladder rungs).
+   * Without this, an exit fires at gross 1.5% but the trader nets 1.5% −
+   * 2 × taker = ~1.4%, undershooting the configured target. Default is a
+   * conservative 2× taker (paper). Override per environment.
+   */
+  EXIT_FEE_BUFFER_PCT: numFromString(0.001),
+  MARGIN_CURRENCY: z.string().default('USDT'),
+  USE_SMC: boolFromString(true),
+
+  USE_SMC_CONFLUENCE: boolFromString(true),
+  SMC_CONFLUENCE_MODE: z
+    .union([z.enum(['standard', 'sniper']), z.string()])
+    .default('standard')
+    .transform((v) => (String(v).toLowerCase() === 'sniper' ? 'sniper' : 'standard'))
+    .pipe(z.enum(['standard', 'sniper'])),
+  SMC_CONFLUENCE_MIN_STANDARD: numFromString(3),
+  SMC_CONFLUENCE_MIN_SNIPER: numFromString(4),
+  SMC_CONFLUENCE_TARGET_PCT: numFromString(0.015),
+
+  /**
+   * Multi-timeframe SMC stack (5m execution close, 15m/1h/4h/1d filters; optional 1m for finer chart/stream).
+   * Legacy env: `USE_SOL_MTF_STRATEGY` still honored if set (overrides default when present).
+   */
+  USE_SOL_MTF_STRATEGY: z.preprocess((val) => {
+    if (process.env.USE_SOL_MTF_STRATEGY !== undefined && (val === undefined || val === '')) {
+      return process.env.USE_SOL_MTF_STRATEGY;
+    }
+    return val ?? 'true';
+  }, boolFromString(true)),
+  TRADES_CSV_PATH: z.string().default('./logs/trades.csv'),
+  TRADE_LOG_PATH: z.string().default('./logs/trades.csv'),
+
+  /** Append NDJSON log lines (empty = stdout/stderr only). */
+  APP_LOG_PATH: z.string().default('./logs/app.ndjson'),
+  /**
+   * When true, emit **info** / **warn** on stdout/stderr as NDJSON (same shape as `APP_LOG_PATH` file lines).
+   * Default keeps human-readable `msg {json}` lines for local dev; enable in Docker / log aggregators.
+   */
+  LOG_JSON_CONSOLE: boolFromString(false),
+
+  EXECUTION_MODE: z
+    .union([ExecutionModeEnum, z.string()])
+    .default('paper')
+    .transform((v) => {
+      const s = String(v).toLowerCase();
+      return s === 'live' ? 'live' : 'paper';
+    })
+    .pipe(ExecutionModeEnum),
+  PAPER_INITIAL_BALANCE_USDT: numFromString(10_000),
+  PAPER_MAINT_MARGIN: numFromString(0.005),
+  PAPER_BASE_SLIPPAGE_BPS: numFromString(2),
+  PAPER_LATENCY_MS: numFromString(150),
+  PAPER_LEDGER_DIR: z.string().default('./paper'),
+  PAPER_FUNDING_POLL_SEC: numFromString(300),
+  PAPER_EQUITY_SNAPSHOT_SEC: numFromString(5),
+  PAPER_PARTIAL_FILLS: z.union([z.boolean(), z.string().transform(v => v === 'true' || v === '1')]).default(false),
+  PAPER_MAX_SLIPPAGE_BPS: numFromString(20),
+
+  /** Comma-separated kline timeframes for the multiplex feed. First = execution (LTF) close. */
+  BINANCE_TIMEFRAMES: z
+    .string()
+    .default('5m,15m,1m,1h,4h,1d')
+    .transform((s) =>
+      s
+        .split(',')
+        .map((p) => p.trim().toLowerCase())
+        .filter((p) => p.length > 0),
+    )
+    .pipe(z.array(z.string()).min(1)),
+  BINANCE_HISTORY_BARS: z
+    .union([z.number(), z.string()])
+    .default(500)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(v, 10)))
+    .pipe(z.number().int().min(50).max(2000)),
+  BINANCE_DEPTH_LEVELS: z
+    .union([z.number(), z.string()])
+    .default(20)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(v, 10)))
+    .pipe(z.union([z.literal(0), z.literal(5), z.literal(10), z.literal(20)])),
+  BINANCE_DEPTH_SPEED: z.enum(['100ms', '500ms']).default('100ms'),
+  BINANCE_USE_AGGTRADE: boolFromString(true),
+  BINANCE_USE_BOOKTICKER: boolFromString(true),
+  BINANCE_USE_MARK_PRICE: boolFromString(true),
+  /** Stream per-symbol liquidation orders (`@forceOrder`) for SMC liquidity sweep detection. USD-M only. */
+  BINANCE_USE_FORCE_ORDER: boolFromString(false),
+  /** Stream ALL-symbol liquidation events (`!forceOrder@arr`). Useful for cascade detection. USD-M only. */
+  BINANCE_USE_GLOBAL_FORCE_ORDER: boolFromString(false),
+  BINANCE_WS_RECONNECT_HOURS: numFromString(23),
+
+  /**
+   * USD-M **testnet** (HMAC keys from testnet.binancefuture.com): REST `testnet.binancefuture.com`,
+   * WS `fstream.binancefuture.com`. Only applies when `BINANCE_PRODUCT=usdm`.
+   * For Binance **demo trading** REST (`demo-fapi.binance.com`) use `BINANCE_PRODUCT=usdm_demo` instead.
+   *
+   * Binance REST (`BinanceRestClient`): max HTTP attempts per call on 408/429/5xx and transport failures.
+   * 1 = no retries. Capped at 12.
+   */
+  BINANCE_REST_RETRY_MAX_ATTEMPTS: z
+    .string()
+    .optional()
+    .default('4')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 1) return 4;
+      return Math.min(12, n);
+    }),
+  /** Initial backoff cap (ms) before exponential growth; combined with full jitter. */
+  BINANCE_REST_RETRY_BASE_MS: z
+    .string()
+    .optional()
+    .default('400')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 50) return 400;
+      return Math.min(10_000, n);
+    }),
+  /** Upper bound (ms) on each wait, including when honoring `Retry-After`. */
+  BINANCE_REST_RETRY_MAX_MS: z
+    .string()
+    .optional()
+    .default('20000')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 100) return 20_000;
+      return Math.min(120_000, n);
+    }),
+
+  /**
+   * USD-M Futures **testnet** (derivatives demo): REST `demo-fapi.binance.com`, WS `fstream.binancefuture.com`.
+   * Ignored when `BINANCE_PRODUCT=spot`. Overrides ignored if `BINANCE_REST_BASE` / `BINANCE_WS_BASE` are set.
+   * @see https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info
+   */
+  BINANCE_FUTURES_TESTNET: boolFromString(false),
+
+  /**
+   * Binance HMAC-SHA256 REST trading credentials — **mainnet**.
+   * Required when `BINANCE_EXECUTION_ADAPTER=true` and `BINANCE_FUTURES_TESTNET=false`.
+   * Enable Futures trading on the API key and restrict by IP before going live.
+   */
+  BINANCE_API_KEY: z.string().default(''),
+  BINANCE_API_SECRET: z.string().default(''),
+
+  /**
+   * Binance HMAC-SHA256 REST trading credentials — **testnet**.
+   * Required when `BINANCE_EXECUTION_ADAPTER=true` and `BINANCE_FUTURES_TESTNET=true`.
+   * Generate at https://testnet.binancefuture.com — these keys are completely separate
+   * from mainnet keys and will produce -2015 errors if used against mainnet endpoints.
+   */
+  BINANCE_TESTNET_API_KEY: z.string().default(''),
+  BINANCE_TESTNET_API_SECRET: z.string().default(''),
+
+  /**
+   * Safety interlock for mainnet live trading.
+   * Must be set to `true` (or `"true"`) when `EXECUTION_MODE=live`,
+   * `BINANCE_EXECUTION_ADAPTER=true`, and `BINANCE_FUTURES_TESTNET=false`.
+   * Prevents accidental real-money orders during development.
+   * `CONFIRMED_LIVE` is read as a fallback when this key is unset or empty (same meaning).
+   */
+  CONFIRMED_LIVE_TRADING: z.preprocess((val: unknown) => {
+    if (val !== undefined && val !== '') return val;
+    const alt = process.env.CONFIRMED_LIVE;
+    if (alt !== undefined && alt !== '') return alt;
+    return val;
+  }, boolFromString(false)),
+
+  /**
+   * When true, live execution uses Binance FAPI directly (HMAC REST + private WS) instead of CoinDCX.
+   * Requires matching API keys, `EXECUTION_MODE=live`, `READ_ONLY=false`.
+   * For mainnet also requires `CONFIRMED_LIVE_TRADING=true`.
+   */
+  BINANCE_EXECUTION_ADAPTER: boolFromString(false),
+
+  /**
+   * Enable the Binance private user-data WebSocket stream (ORDER_TRADE_UPDATE, ACCOUNT_UPDATE).
+   * Automatically enabled when `BINANCE_EXECUTION_ADAPTER=true` and `EXECUTION_MODE=live`.
+   */
+  BINANCE_PRIVATE_WS_ENABLED: boolFromString(false),
+
+  /**
+   * Binance USD-M **WebSocket trading API** (`ws-fapi`) — session.logon / order.place (Ed25519).
+   * Separate from public `fstream` market streams. Does not replace CoinDCX execution unless you wire it yourself.
+   * @see https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-api-general-info
+   */
+  BINANCE_FAPI_WS_ENABLED: boolFromString(false),
+  BINANCE_FAPI_API_KEY: z.string().default(''),
+  /** PEM file path for Binance API Ed25519 private key (PKCS#8). */
+  BINANCE_FAPI_ED25519_PRIVATE_KEY_PATH: z.string().default(''),
+  BINANCE_FAPI_WS_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  BINANCE_FAPI_WS_REQUEST_TIMEOUT_MS: numFromString(30_000),
+  /** When true, handshake uses `?returnRateLimits=false`. */
+  BINANCE_FAPI_WS_HIDE_RATELIMITS: boolFromString(false),
+
+  /**
+   * When true, `src/index.ts` serves the dashboard WebSocket on `DASHBOARD_BIND`:`DASHBOARD_PORT`
+   * using the same multiplex-backed store/orderbook/trade tape as the orchestrator (no duplicate Binance WS).
+   */
+  DASHBOARD_ENABLED: boolFromString(false),
+  /** Dashboard WebSocket listen port (browser UI connects here, e.g. via `npm run ui:dev`). */
+  DASHBOARD_PORT: z
+    .string()
+    .default('4001')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 1 || n > 65535) return 4001;
+      return n;
+    }),
+  /** Dashboard HTTP/WS bind address (`127.0.0.1` = local only; use `0.0.0.0` for LAN/Docker). */
+  DASHBOARD_BIND: z.string().default('127.0.0.1'),
+  /** In-memory kline cap per timeframe when the dashboard is enabled (larger = deeper chart history). */
+  DASHBOARD_STORE_MAX_BARS: z
+    .union([z.number(), z.string()])
+    .default(100_000)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10)))
+    .pipe(z.number().int().min(1000).max(500_000)),
+
+  /**
+   * Optional LLM narrative from structured signals via `ollama` JS → local Ollama or Ollama Cloud (dashboard UI).
+   */
+  AI_MARKET_BRIEF_ENABLED: boolFromString(false),
+  /**
+   * AI Provider: `ollama` (default) or `openai` (for llama.cpp / local OpenAI-compatible APIs).
+   */
+  AI_PROVIDER: z.enum(['ollama', 'openai']).default('ollama'),
+  /**
+   * OpenAI-compatible API base URL (e.g., http://127.0.0.1:8080/v1 for llama.cpp).
+   * Only used when AI_PROVIDER=openai.
+   */
+  AI_OPENAI_URL: z.string().default('http://127.0.0.1:8080/v1'),
+  /** Model name for the OpenAI provider. */
+  AI_OPENAI_MODEL: z.string().default('local-model'),
+  /**
+   * Which Ollama API base to use (URLs are fixed in code — see `ollamaApiUrl`).
+   * `local` → `http://127.0.0.1:11434` · `cloud` → `https://ollama.com` (set `OLLAMA_API_KEY`).
+   */
+  OLLAMA_TARGET: z
+    .union([z.enum(['local', 'cloud']), z.string()])
+    .default('local')
+    .transform((v) => {
+      const s = String(v).trim().toLowerCase();
+      return s === 'cloud' ? 'cloud' : 'local';
+    })
+    .pipe(z.enum(['local', 'cloud'])),
+  /** Model name as known to Ollama (e.g. `llama3.2`, `mistral` — run `ollama pull <name>` locally). */
+  OLLAMA_MODEL: z.string().default('llama3.2'),
+  /** Bearer token for Ollama Cloud (required when `OLLAMA_TARGET=cloud`). */
+  OLLAMA_API_KEY: z.string().default(''),
+  /** Minimum seconds between LLM calls when signals refresh. */
+  AI_BRIEF_INTERVAL_SEC: z
+    .union([z.number(), z.string()])
+    .default(120)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10)))
+    .pipe(z.number().int().min(30).max(3600)),
+  /**
+   * Hard floor between brief calls per symbol, even when an "event" (BOS,
+   * CHoCH, supertrend flip) forces a refresh. Stops chatter when LTF
+   * indicators oscillate around a flip threshold and fire every kline close.
+   */
+  AI_BRIEF_FORCED_COOLDOWN_SEC: z
+    .union([z.number(), z.string()])
+    .default(45)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10)))
+    .pipe(z.number().int().min(5).max(3600)),
+  /** When true, Ollama extended thinking is on (`think: true`); uses more tokens. */
+  AI_BRIEF_THINK_ENABLED: boolFromString(false),
+  /** When true, stream the brief over the dashboard WebSocket (partial `ai_brief` updates). */
+  AI_BRIEF_STREAM_ENABLED: boolFromString(false),
+  /**
+   * The context window size (in tokens) to request from the AI provider.
+   * Higher values allow longer message history and more MCP tool data but use more VRAM/memory.
+   */
+  AI_CONTEXT_SIZE: z
+    .union([z.number(), z.string()])
+    .default(8192)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10)))
+    .pipe(z.number().int().min(2048).max(128_000)),
+  AI_REQUEST_TIMEOUT_MS: z
+    .union([z.number(), z.string()])
+    .default(60_000)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10)))
+    .pipe(z.number().int().min(0).max(300_000)),
+  /**
+   * When true (and dashboard enabled), periodically asks Ollama for SuperTrend `atrPeriod` + `multiplier`;
+   * the chart still uses deterministic {@link supertrend} math with those parameters.
+   */
+  /**
+   * When true, the in-app AI market-brief / chat loop can call MCP tools served
+   * by `mcp-server` (Binance + CoinDCX public market data). Off by default;
+   * leaving it disabled preserves the current Ollama-only behavior.
+   */
+  AI_MCP_ENABLED: boolFromString(false),
+  /** URL of the MCP server's streamable-http endpoint. */
+  AI_MCP_URL: z.string().default('http://localhost:4003'),
+  /** Maximum number of tool-call iterations the chat loop may take per request. */
+  AI_MCP_MAX_TOOL_ITER: numFromString(4),
+  AI_SUPERTREND_TUNING_ENABLED: boolFromString(false),
+  /** Minimum seconds between SuperTrend tuning Ollama calls per symbol. */
+  AI_SUPERTREND_TUNING_INTERVAL_SEC: z
+    .union([z.number(), z.string()])
+    .default(300)
+    .transform((v) => (typeof v === 'number' ? v : Number.parseInt(String(v), 10)))
+    .pipe(z.number().int().min(60).max(3600)),
+
+  /**
+   * Telegram Bot API credentials for professional AI-trader alerts.
+   * If unset, the TelegramNotifier service remains idle.
+   */
+  TELEGRAM_BOT_TOKEN: z.preprocess(emptyToUndefined, z.string().optional()),
+  TELEGRAM_CHAT_ID: z.preprocess(emptyToUndefined, z.string().optional()),
+  /** Comma-separated: critical,trade,signal,trail,wallet,ai,system (default critical+trade+signal+ai+system). */
+  TELEGRAM_ALERT_LEVELS: z.string().default(''),
+  TELEGRAM_RATE_PER_MIN: numFromString(20),
+  TELEGRAM_TRAIL_THROTTLE_SEC: numFromString(300),
+  TELEGRAM_WALLET_DELTA_PCT: numFromString(0.02),
+  TELEGRAM_WALLET_INTERVAL_MIN: numFromString(30),
+  TELEGRAM_DIGEST_INTERVAL_MIN: numFromString(360),
+
+  /**
+   * Binance `POST /fapi/v1/countdownCancelAll` period (ms). Each tick renews the timer.
+   * 0 = disabled. Example: `120000` = cancel all open orders if renewals stop for 2 minutes.
+   */
+  BINANCE_DEADMAN_COUNTDOWN_MS: z
+    .string()
+    .optional()
+    .default('0')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 0) return 0;
+      return Math.min(7 * 24 * 60 * 60 * 1000, n);
+    }),
+
+  /**
+   * Halt new entries and cancel open orders when USDT wallet balance falls this fraction
+   * below the session peak (0 = disabled). Peak is updated from `ACCOUNT_UPDATE` and startup `GET /fapi/v2/account`.
+   */
+  DAILY_DRAWDOWN_KILL_PCT: numFromString(0),
+
+  /**
+   * When > 0, pause new entries if `GET /fapi/v1/rateLimit/order` shows ORDER row `count/limit` ≥ this threshold (e.g. 0.92).
+   */
+  ORDER_RATE_LIMIT_PAUSE_THRESHOLD: numFromString(0),
+
+  /** Max bid-ask spread in bps to allow entry (0 = disabled). Rejects entries in wide-spread conditions. */
+  MAX_ENTRY_SPREAD_BPS: numFromString(0),
+
+  /** Max concurrent open positions across all symbols (0 = unlimited). */
+  MAX_OPEN_POSITIONS: numFromString(0),
+
+  /** Max total exposure across all symbols in USDT. */
+  MAX_TOTAL_EXPOSURE_USDT: numFromString(100_000),
+
+  /** Max number of symbols with open positions. */
+  MAX_OPEN_SYMBOLS: numFromString(5),
+
+  /**
+   * Route strategy signals through the event-bus path
+   *   actor → strategy.signal → SignalToOrderBridge → TradePlanner → OMS → RiskEngine → ExecutionBridge → adapter.
+   * Default true. When true the legacy HybridOrchestrator execution branches are gated off
+   * (see TODO_CLEANUP_LEGACY_EXECUTION markers) so the two paths never compete.
+   * Live mode requires this to be true and will throw on startup if it is false.
+   */
+  EVENT_BUS_EXECUTION_ENABLED: z.preprocess((v) => v === undefined ? true : (v === 'true' || v === true), z.boolean()),
+
+  /**
+   * C-7: stale-feed risk-off thresholds. The FreshnessWatchdog publishes
+   * `system.stale` for a symbol when none of its market data sources
+   * (kline/bookticker/mark) has reported within this many ms, and
+   * `system.fresh` as soon as any source recovers. RiskEngine subscribes
+   * and rejects `execution.order.requested` for stale symbols with reason
+   * `STALE_FEED`. Default 30s — long enough to ride out a single missed
+   * kline on a fast TF, short enough to catch real feed loss before a
+   * signal fires on cached candles.
+   */
+  STALE_FEED_THRESHOLD_MS: numFromString(30_000),
+  /** How often the watchdog scans the lastSeen map. Default 5s. */
+  STALE_FEED_CHECK_INTERVAL_MS: numFromString(5_000),
+
+  /** Min signal confidence for SignalToOrderBridge to emit an order request. */
+  MIN_SIGNAL_CONFIDENCE: numFromString(0.5),
+
+  /** Cooldown between consecutive event-bus orders per symbol (ms). */
+  EVENT_BUS_ORDER_COOLDOWN_MS: numFromString(60_000),
+
+  // ── Seykota trend-follower strategy (event-bus path) ────────────────────
+  /** Attach SeykotaTrendModule to each SymbolActor (event-bus path only). */
+  SEYKOTA_ENABLED: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+  /** HTF for bias filter. */
+  SEYKOTA_HTF: z.string().default('1h'),
+  SEYKOTA_FAST_EMA: numFromString(20),
+  SEYKOTA_SLOW_EMA: numFromString(50),
+  SEYKOTA_ADX_PERIOD: numFromString(14),
+  /** Below this ADX = chop, skip entry. Typical 20–25 for crypto. */
+  SEYKOTA_ADX_THRESHOLD: numFromString(20),
+  SEYKOTA_ATR_PERIOD: numFromString(14),
+  /** Stop = entry ± atrMult × atr; trailing manager uses same multiplier. */
+  SEYKOTA_ATR_MULT: numFromString(3),
+  /** Min ATR / price ratio; below this market is too dead to trade. */
+  SEYKOTA_MIN_ATR_PCT: numFromString(0.003),
+  /** Risk per trade as fraction of equity. 0.005 = 0.5%. */
+  SEYKOTA_RISK_PCT: numFromString(0.005),
+  /** Account equity used for sizing math. Sync with PAPER_INITIAL_BALANCE_USDT. */
+  SEYKOTA_EQUITY_USDT: numFromString(10_000),
+  /** Min bars in history before strategy can fire. */
+  SEYKOTA_MIN_BARS: numFromString(80),
+  /** Close on close-of-bar breach only. Set false for intrabar wick protection. */
+  SEYKOTA_KLINE_ONLY: boolFromString(true),
+  /** R-multiple at which to book a partial profit (e.g. 1.0 = entry + 1*ATR_dist). 0 to disable. */
+  SEYKOTA_PARTIAL_TP_R: numFromString(0),
+  /** Fraction of position to close at SEYKOTA_PARTIAL_TP_R (0.5 = 50%). */
+  SEYKOTA_PARTIAL_TP_PCT: numFromString(0.5),
+  /** Enable SMC structure-break (CHoCH) exit. Requires SMC analysis. */
+  SEYKOTA_SMC_EXIT_ENABLED: boolFromString(false),
+  /** Max number of pyramiding additions to a winning trade. 0 to disable. */
+  SEYKOTA_PYRAMID_MAX_ADDS: numFromString(0),
+  /** R-multiple distance between pyramid additions (e.g. 1.0 = add every +1R). */
+  SEYKOTA_PYRAMID_R_DISTANCE: numFromString(1.0),
+
+  // ── Paper hot-state Redis cache ─────────────────────────────────────────
+  /**
+   * When true (and REDIS_URL set) the paper adapter mirrors wallet + open
+   * positions into Redis, and appends every onMark snapshot to a bounded
+   * Redis stream `paper:equity`. The dashboard + FastAPI can subscribe to
+   * `paper:updates:*` pubsub channels for push notifications without polling.
+   */
+  PAPER_STATE_REDIS: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+  /** Redis key namespace. All keys/streams/pubsub channels prefixed `${ns}:paper:*`. */
+  REDIS_NAMESPACE: z.string().default('binance'),
+  /**
+   * Throttle for JSONL equity log writes. Default 12 = one JSONL line per
+   * 12 onMark snapshots (~60s when PAPER_EQUITY_SNAPSHOT_SEC=5). 0 disables.
+   * Redis stream remains the high-frequency record.
+   */
+  PAPER_EQUITY_JSONL_EVERY_N: numFromString(12),
+
+  // ── Signal allocator (best-of-bar) ──────────────────────────────────────
+  /**
+   * Buffer simultaneous strategy candidates per 5m close, score by quality
+   * (RR × confidence × regime fit from TradePlanner) and allocate slots to
+   * top N until MAX_OPEN_SYMBOLS hit. Default true — without this, the first
+   * signal to arrive wins regardless of conviction.
+   */
+  SIGNAL_ALLOCATOR_ENABLED: z.preprocess((v) => v === undefined ? true : (v === 'true' || v === true), z.boolean()),
+  /**
+   * Allocation policy:
+   *   `score` (default) — buffer SIGNAL_ALLOCATOR_FLUSH_MS, pick top N by ADX×ATR strength.
+   *   `fcfs`            — first signal to arrive claims the slot. No buffering window.
+   *                       Carryover queue (FIFO) drains when a position closes.
+   * FCFS = tighter latency, no cross-symbol fairness ranking.
+   */
+  SIGNAL_ALLOCATOR_MODE: z.preprocess((v) => v === undefined ? 'score' : String(v).toLowerCase(), z.enum(['score', 'fcfs'])),
+  /** ms to wait after first candidate before flushing the bucket. 1500ms covers
+   *  WS arrival jitter for klines that closed at the same wall-clock minute.
+   *  Ignored when SIGNAL_ALLOCATOR_MODE=fcfs. */
+  SIGNAL_ALLOCATOR_FLUSH_MS: numFromString(1500),
+
+  // ── Correlation guard ───────────────────────────────────────────────────
+  /**
+   * JSON array of pairwise correlations to enforce. Same-direction opens on
+   * pairs with corr > threshold are blocked. Example value:
+   *   [{"symbolA":"BTCUSDT","symbolB":"ETHUSDT","correlation":0.85},
+   *    {"symbolA":"BTCUSDT","symbolB":"SOLUSDT","correlation":0.75}]
+   */
+  CORRELATION_PAIRS_JSON: z.string().default(''),
+  CORRELATION_THRESHOLD: numFromString(0.7),
+
+  // ── Exit managers (event-bus path) ───────────────────────────────────────
+  /** Trail reacts on every bookticker tick (not only kline.closed). Protects wicks. */
+  SEYKOTA_TRAIL_INTRABAR: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+
+  /** Partial close at +Nx initial-risk distance. PARTIAL_TP_R=1 → +1R. */
+  PARTIAL_TP_ENABLED: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+  PARTIAL_TP_R: numFromString(1),
+  /** Fraction of qty to close at the partial-TP trigger. */
+  PARTIAL_TP_FRACTION: numFromString(0.5),
+
+  /** Time stop: close if position has been open ≥ N bars AND net is negative. */
+  TIME_STOP_ENABLED: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+  TIME_STOP_BARS: numFromString(24),
+  /** Percentage of initial stop-loss distance required to trigger time stop (0.5 = 50%). */
+  TIME_STOP_THRESHOLD_PCT: numFromString(0.5),
+
+  /** Signal reversal exit: close if strategy emits a confident opposite-side signal. */
+  SIGNAL_REVERSAL_EXIT_ENABLED: z.preprocess((v) => v === undefined ? true : (v === 'true' || v === true), z.boolean()),
+
+  /** High-watermark exit: activate after favorable move of this % of entry price (0.005 = 0.5%). 0 = disabled. */
+  WATERMARK_ACTIVATION_PCT: numFromString(0.005),
+  /** Drop from peak PnL to trigger watermark exit (0.4 = 40% retrace from peak profit). */
+  DROP_FROM_PEAK_PCT: numFromString(0.4),
+
+  /** Structure exit: close LONG if recent swing low broken (and vice versa for SHORT). */
+  STRUCTURE_EXIT_ENABLED: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+  STRUCTURE_SWING_LOOKBACK: numFromString(20),
+  /** Gate structure exit on signal confirmation — skip if latest signal still agrees with position. */
+  STRUCTURE_EXIT_CHECK_SIGNALS: z.preprocess((v) => v === undefined ? true : (v === 'true' || v === true), z.boolean()),
+
+  /** Funding-aware exit: close before next funding tick when |rate|*8h > threshold bps and adverse. */
+  FUNDING_EXIT_ENABLED: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+  FUNDING_EXIT_THRESHOLD_BPS: numFromString(50),
+
+  // ── Adaptive (regime-aware) strategy ────────────────────────────────────
+  /** Replace SeykotaTrendModule with AdaptiveStrategy when true. Mutually exclusive. */
+  ADAPTIVE_STRATEGY_ENABLED: z.preprocess((v) => v === undefined ? false : (v === 'true' || v === true), z.boolean()),
+  /** Equity for sizing math (keep aligned with PAPER_INITIAL_BALANCE_USDT). */
+  ADAPTIVE_EQUITY_USDT: numFromString(10_000),
+  /** Cooldown between consecutive entries per symbol (ms). */
+  ADAPTIVE_COOLDOWN_MS: numFromString(5 * 60_000),
+  /** Optional JSON map to override DEFAULT_MODES (see src/strategy/trade-mode.ts). */
+  ADAPTIVE_MODE_OVERRIDES_JSON: z.string().default(''),
+
+  /**
+   * When true (default in live mode), ExecutionBridge skips synthesising
+   * execution.order.filled from the adapter's local result and lets the
+   * CoinDcxUserDataWs emit the authoritative fill from the exchange.
+   * Avoids double-counting in RiskEngine + TrailingStopManager.
+   */
+  LIVE_USE_WS_FOR_FILLS: z.preprocess((v) => v === undefined ? true : (v === 'true' || v === true), z.boolean()),
+
+  /**
+  /**
+   * Cross-symbol correlation guard (Binance USD-M live only, when `binanceRestClient` exists).
+   * Pipe `|` separates clusters; comma separates symbols that should not share same-direction risk.
+   * Example: `BTCUSDT,ETHUSDT|SOLUSDT,AVAXUSDT` — blocks a new SOLUSDT long while ETHUSDT has an open long in the same cluster.
+   * Empty = disabled.
+   */
+  BINANCE_CORRELATION_SYMBOL_GROUPS: z
+    .string()
+    .default('')
+    .transform((s) => parseCorrelationSymbolGroups(s)),
+
+  /**
+   * When true, the orchestrator evaluates and trades every symbol in `ASSET_TIERS`
+   * that is also present in the active multiplex feed (BINANCE_SYMBOL + BINANCE_WATCHLIST).
+   * When false, the orchestrator falls back to the legacy single-symbol path on
+   * `BINANCE_SYMBOL` only.
+   */
+  ENABLE_MULTI_ASSET: boolFromString(true),
+
+  /**
+   * Optional JSON map of per-symbol tier overrides applied on top of ASSET_TIERS.
+   * Example: `{"SOLUSDT":{"leverage":3,"marginUsdt":1000},"DOGEUSDT":{"tier":"swing","ltf":"15m","htf":"4h","leverage":3,"tpPct":0.02,"slPct":0.012,"marginUsdt":600,"minConfidence":0.7}}`.
+   * Empty string = no overrides.
+   */
+  ASSET_TIER_OVERRIDES_JSON: z.string().default(''),
+
+  /** Scale position size inversely with realized volatility. */
+  VOL_ADJUSTED_SIZING: boolFromString(false),
+  /** Baseline realized volatility (annualized %). Position scales down when rv > baseline. */
+  VOL_BASELINE: numFromString(0),
+
+  /** UTC hours allowed for new entries (e.g. "02:00-21:00"). Empty = no restriction. */
+  TRADING_HOURS_UTC: z.string().default(''),
+
+  /** Entry order type: MARKET (default) or LIMIT_GTX (post-only maker fill at microprice). */
+  ENTRY_ORDER_TYPE: z.string().default('MARKET'),
+  /** Trailing stop callback rate (%). 0 = use fixed SL instead. */
+  TRAILING_STOP_CALLBACK_RATE: numFromString(0),
+
+  /** Enable ML inference pipeline (feature collection, inference client, ML gate). */
+  ML_ENABLED: boolFromString(false),
+  /** ML inference server URL (Python FastAPI). */
+  ML_INFERENCE_URL: z.string().default('http://localhost:8000/infer'),
+  /** Minimum model probability to act on a signal. */
+  ML_MIN_PROBABILITY: numFromString(0.65),
+  /** Minimum edge in bps after fees for ML to allow entry. */
+  ML_MIN_EDGE_BPS: numFromString(8),
+  /** When true, ML logs predictions but does not override SMC entry decisions. */
+  ML_SHADOW_MODE: boolFromString(true),
+  /** Inference timeout in ms. */
+  ML_INFERENCE_TIMEOUT_MS: numFromString(2000),
+  /** Directory for recorded feature vectors (training data). */
+  ML_FEATURE_DIR: z.string().default('./data/features'),
+  /** Directory for prediction logs. */
+  ML_PREDICTION_DIR: z.string().default('./data/predictions'),
+
+
+
+  /** HTTP port for the Prometheus /metrics + /health endpoint (0 = disabled). */
+  PROMETHEUS_PORT: z
+    .string()
+    .default('9090')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 0 || n > 65535) return 9090;
+      return n;
+    }),
+
+  /** When true, start the prom-client based Prometheus metrics HTTP server on PROMETHEUS_PORT. */
+  PROMETHEUS_ENABLED: boolFromString(false),
+
+  /** PostgreSQL connection URL for PnL dashboard persistence (empty = disabled). */
+  POSTGRES_URL: z.string().default(''),
+
+  /**
+   * C-8: path to a local append-only write-ahead log for the event store.
+   * When set, every event is fsync'd to disk before being enqueued for
+   * Postgres, and the file is replayed at startup so events that didn't make
+   * it to Postgres before a crash are not lost. Empty = WAL disabled (data
+   * loss possible on PG pool exhaustion + crash). Recommended for live mode.
+   */
+  EVENT_WAL_PATH: z.string().default('./data/event-wal.ndjson'),
+  /** Compact the WAL after this many events have been ACK'd by Postgres. */
+  EVENT_WAL_COMPACT_AFTER: numFromString(500),
+
+  SHUTDOWN_TIMEOUT_MS: numFromString(5000),
+  SHUTDOWN_FORCE_EXIT_MS: numFromString(10000),
+
+  /**
+   * ioredis connection URL. When set, the bot publishes ticks, signals, and position events
+   * to Redis pub/sub channels and writes position/balance state to Redis keys.
+   * When absent (default), all Redis calls are silently skipped — the bot runs unchanged.
+   * Example: `redis://localhost:6379`
+   */
+  REDIS_URL: z.preprocess(emptyToUndefined, z.string().optional()),
+
+  /**
+   * HTTP port for the runtime control plane (`/runtime/config`, `/runtime/status`,
+   * `/runtime/kill`, `/runtime/unkill`). 0 = disabled. Default 4002.
+   * Binds to 127.0.0.1 only — not exposed externally unless you reverse-proxy it.
+   */
+  CONTROL_PORT: z
+    .string()
+    .default('4002')
+    .transform((s) => {
+      const n = Number.parseInt(String(s).trim(), 10);
+      if (!Number.isFinite(n) || n < 0 || n > 65535) return 4002;
+      return n;
+    }),
+
+  /**
+   * Shared-secret bearer token required by the runtime control HTTP server.
+   * Every request must include `Authorization: Bearer <CONTROL_AUTH_TOKEN>` —
+   * this protects /runtime/config, /runtime/kill, /runtime/unkill, and /runtime/status
+   * from any process that gains access to localhost (sidecars, kubectl port-forward,
+   * shared user accounts). REQUIRED when `EXECUTION_MODE=live` and `CONTROL_PORT>0`;
+   * startup throws if missing. In paper mode the bot logs a loud warning and the
+   * server runs unauthenticated so local dev tooling still works.
+   */
+  CONTROL_AUTH_TOKEN: z.preprocess(emptyToUndefined, z.string().min(16).optional()),
+
+  SELF_LEARNING_ENABLED: boolFromString(false),
+  SELF_LEARNING_PAPER_ONLY: boolFromString(true),
+  SELF_LEARNING_INTERVAL_MS: numFromString(3_600_000),
+  SELF_LEARNING_OLLAMA_URL: z.string().default('http://127.0.0.1:11434'),
+  SELF_LEARNING_OLLAMA_MODEL: z.string().default('llama3.1:8b-instruct-q8_0'),
+  /** Optional JSON string for default partial profit targets: `[{"r":1, "pct":0.5}]` */
+  DEFAULT_PARTIAL_TARGETS_JSON: z.preprocess(emptyToUndefined, z.string().optional()),
+  /** Allow adding to an existing position in the same direction. */
+  ALLOW_PYRAMIDING: boolFromString(false),
+});
+
+export type AppConfig = z.infer<typeof AppConfigSchema>;
+
+export const multiplexBinanceSymbols = (cfg: AppConfig): string[] => {
+  const primary = cfg.BINANCE_SYMBOL.trim().toUpperCase();
+  const wl = cfg.BINANCE_WATCHLIST ?? [];
+  const extra = wl.filter((s) => s !== primary);
+  return [primary, ...extra];
+}
+
+/** Ollama HTTP API base for `OLLAMA_TARGET=local` (fixed). */
+export const OLLAMA_LOCAL_API_URL = 'http://127.0.0.1:11434' as const;
+/** Ollama HTTP API base for `OLLAMA_TARGET=cloud` (fixed). @see https://github.com/ollama/ollama-js */
+export const OLLAMA_CLOUD_API_URL = 'https://ollama.com' as const;
+
+export type OllamaTarget = 'local' | 'cloud';
+
+export const ollamaApiUrl = (target: OllamaTarget): string => {
+  return target === 'cloud' ? OLLAMA_CLOUD_API_URL : OLLAMA_LOCAL_API_URL;
+}
+
+export const applyTradingAssetPreset = (cfg: AppConfig): AppConfig => {
+  if (cfg.TRADING_ASSET === 'custom') return cfg;
+  const p = TRADING_ASSET_PRESETS[cfg.TRADING_ASSET];
+  return {
+    ...cfg,
+    BINANCE_SYMBOL: p.binanceSymbol,
+    COINDCX_PAIR: p.coindcxPair,
+  };
+}
+
+export const loadConfig = (): AppConfig => {
+  const parsed = AppConfigSchema.parse(process.env);
+  return applyTradingAssetPreset(parsed);
+}
+
+/**
+ * Returns the correct HMAC API key and secret for the active environment.
+ * Testnet and mainnet use completely separate key pairs — mixing them
+ * produces a -2015 Invalid API-key error from Binance.
+ */
+export const binanceApiCredentials = (cfg: AppConfig): { apiKey: string; apiSecret: string } => {
+  if (cfg.BINANCE_FUTURES_TESTNET) {
+    return {
+      apiKey: cfg.BINANCE_TESTNET_API_KEY.trim(),
+      apiSecret: cfg.BINANCE_TESTNET_API_SECRET.trim(),
+    };
+  }
+  return {
+    apiKey: cfg.BINANCE_API_KEY.trim(),
+    apiSecret: cfg.BINANCE_API_SECRET.trim(),
+  };
+}
+
+/** True for USD-M perpetual products (`usdm` or Binance demo-fapi `usdm_demo`). */
+export const isBinanceUsdmProduct = (p: AppConfig['BINANCE_PRODUCT']): boolean =>
+  p === 'usdm' || p === 'usdm_demo';
+
+export const binanceRestBase = (cfg: AppConfig): string => {
+  if (cfg.BINANCE_REST_BASE) return cfg.BINANCE_REST_BASE;
+  if (cfg.BINANCE_PRODUCT === 'spot') return 'https://api.binance.com';
+  if (cfg.BINANCE_PRODUCT === 'usdm_demo') return 'https://demo-fapi.binance.com';
+  if (cfg.BINANCE_FUTURES_TESTNET && cfg.BINANCE_PRODUCT === 'usdm') return 'https://testnet.binancefuture.com';
+  return 'https://fapi.binance.com';
+}
+
+export const binanceWsBase = (cfg: AppConfig): string => {
+  if (cfg.BINANCE_WS_BASE) return cfg.BINANCE_WS_BASE;
+  if (cfg.BINANCE_PRODUCT === 'spot') return 'wss://stream.binance.com:9443';
+  if (cfg.BINANCE_PRODUCT === 'usdm_demo') return 'wss://fstream.binancefuture.com';
+  if (cfg.BINANCE_FUTURES_TESTNET && cfg.BINANCE_PRODUCT === 'usdm') return 'wss://fstream.binancefuture.com';
+  return 'wss://fstream.binance.com';
+}

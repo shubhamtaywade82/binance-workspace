@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quantum Trade — Live Dashboard</title>
+  <meta name="description" content="Institutional-grade live trading dashboard with TradingView charts, real-time order book, dedicated trade tape tab, and AI strategy signals." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header id="topbar">
+    <div class="topbar-left">
+      <div class="logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+          <polygon points="14,2 26,8 26,20 14,26 2,20 2,8" fill="none" stroke="#7c4dff" stroke-width="1.5"/>
+          <polygon points="14,6 22,10 22,18 14,22 6,18 6,10" fill="#7c4dff" opacity="0.2"/>
+          <circle cx="14" cy="14" r="3" fill="#7c4dff"/>
+        </svg>
+        <span class="logo-text">QuantumTrade</span>
+      </div>
+      <div class="pair-dropdown-wrap">
+        <button type="button" class="pair-badge" id="pair-badge" title="Select Symbol" aria-haspopup="dialog" aria-expanded="false">
+          <span id="hdr-symbol">SOLUSDT</span>
+          <span class="badge-tag">PERP</span>
+          <svg class="pair-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+        </button>
+        <div id="symbol-dropdown" class="symbol-dropdown" hidden>
+          <div class="symbol-search-wrap">
+            <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="symbol-search-input" class="symbol-search-input" placeholder="Search symbol..." autocomplete="off" spellcheck="false" />
+          </div>
+          <div id="symbol-list" class="symbol-list" role="listbox"></div>
+        </div>
+      </div>
+      <div id="watchlist-bar" class="watchlist-bar hidden" role="toolbar" aria-label="Watchlist"></div>
+    </div>
+    <div class="topbar-center">
+      <div class="price-cluster">
+        <span id="hdr-price" class="hdr-price">—</span>
+        <span id="hdr-change" class="hdr-change neutral">—</span>
+      </div>
+      <div class="stats-row">
+        <div class="stat-item">
+          <span class="stat-label">MARK</span>
+          <span id="hdr-mark" class="stat-value">—</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">BID</span>
+          <span id="hdr-bid" class="stat-value bull">—</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">ASK</span>
+          <span id="hdr-ask" class="stat-value bear">—</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">SPREAD</span>
+          <span id="hdr-spread" class="stat-value">—</span>
+        </div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div id="tf-tabs" class="tf-tabs">
+        <button class="tf-btn" data-tf="1m">1m</button>
+        <button class="tf-btn active" data-tf="5m">5m</button>
+        <button class="tf-btn" data-tf="15m">15m</button>
+        <button class="tf-btn" data-tf="1h">1h</button>
+        <button class="tf-btn" data-tf="4h">4h</button>
+        <button class="tf-btn" data-tf="1d">1D</button>
+      </div>
+      <button id="btn-toggle-sidebar" class="icon-btn" title="Toggle Sidebar (Ctrl+B)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="15" y1="3" x2="15" y2="21"></line>
+        </svg>
+      </button>
+      <div id="ws-status" class="ws-status connecting">
+        <span class="ws-dot"></span>
+        <span id="ws-status-text">Connecting…</span>
+      </div>
+      <div id="telegram-telemetry" class="telegram-badge inactive" title="Telegram Alerts: Idle">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 2L11 13"></path>
+          <path d="M22 2L15 22L11 13L2 9L22 2Z"></path>
+        </svg>
+        <span id="telegram-status-text">Idle</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main Grid ──────────────────────────────────────────────────────── -->
+  <main id="main-grid">
+    <!-- Column 1: Chart + Signals -->
+    <section id="col-chart">
+      <div class="panel" id="chart-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Price Chart</h2>
+          <div class="panel-controls">
+            <div class="chart-nav-group">
+              <button id="btn-scroll-start" class="tf-btn tf-btn-nav" title="Scroll to oldest bar">⇤ Start</button>
+              <button id="btn-scroll-fit" class="tf-btn tf-btn-nav" title="Fit all data to screen">🔍 Fit</button>
+              <button id="btn-scroll-realtime" class="tf-btn tf-btn-nav" title="Scroll to most recent bar">▶ Recent</button>
+            </div>
+            <div class="candle-theme-wrap" id="candle-theme-wrap">
+              <span id="candle-theme-heading" class="candle-theme-label">Candles</span>
+              <button
+                type="button"
+                id="candle-theme-trigger"
+                class="candle-theme-trigger"
+                title="Candle colors and body style"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-controls="candle-theme-menu"
+                aria-labelledby="candle-theme-heading candle-theme-trigger-label"
+              >
+                <span id="candle-theme-trigger-label" class="candle-theme-trigger-label"></span>
+                <span class="candle-theme-chevron" aria-hidden="true"></span>
+              </button>
+              <div id="candle-theme-menu" class="candle-theme-menu" role="listbox" hidden></div>
+            </div>
+            <button type="button" id="btn-chart-screenshot" class="chart-settings-btn" title="Save Chart Image">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+              <span class="chart-settings-btn-text">Screenshot</span>
+            </button>
+            <button type="button" id="btn-chart-settings" class="chart-settings-btn" title="Indicators & Overlays (Ctrl+I)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+              <span class="chart-settings-btn-text">Indicators</span>
+            </button>
+          </div>
+        </div>
+        <div class="chart-surface" id="chart-surface">
+          <!-- Drawing Toolbar -->
+          <div id="chart-drawing-toolbar" class="chart-drawing-toolbar" role="toolbar" aria-label="Drawing tools">
+            <button class="draw-btn active" data-tool="select" title="Cursor / Pan">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 3 10.07 19.97 12.58 12.58 19.97 10.07 3 3"></polygon></svg>
+            </button>
+            <button class="draw-btn" data-tool="trendline" title="Trendline">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg>
+            </button>
+            <button class="draw-btn" data-tool="hline" title="Horizontal Line">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><circle cx="12" cy="12" r="3"></circle></svg>
+            </button>
+            <button class="draw-btn" data-tool="rect" title="Rectangle">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect></svg>
+            </button>
+            <button class="draw-btn" data-tool="fib" title="Fibonacci Retracement">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="10" x2="20" y2="10"></line><line x1="4" y1="14" x2="20" y2="14"></line><line x1="4" y1="18" x2="20" y2="18"></line></svg>
+            </button>
+            <div class="draw-btn-sep"></div>
+            <button class="draw-btn draw-btn-danger" id="btn-clear-drawings" title="Clear All Drawings">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+            </button>
+          </div>
+          <div id="chart-signal-hud" class="chart-signal-hud" hidden aria-live="polite"></div>
+          <div id="chart-supertrend-hud" class="chart-supertrend-hud" hidden aria-live="polite"></div>
+          
+          <!-- Fixed OHLC Legend Overlay -->
+          <div id="chart-ohlc-legend" class="chart-ohlc-legend">
+            <span id="chart-ohlc-symbol-tf" class="ohlc-symbol-tf">SOLUSDT · 5m</span>
+            <span class="ohlc-item">O <span id="chart-ohlc-o" class="ohlc-val">—</span></span>
+            <span class="ohlc-item">H <span id="chart-ohlc-h" class="ohlc-val">—</span></span>
+            <span class="ohlc-item">L <span id="chart-ohlc-l" class="ohlc-val">—</span></span>
+            <span class="ohlc-item">C <span id="chart-ohlc-c" class="ohlc-val">—</span></span>
+            <span class="ohlc-item">V <span id="chart-ohlc-v" class="ohlc-val">—</span></span>
+            <span id="chart-ohlc-change" class="ohlc-val ohlc-change">—</span>
+          </div>
+
+          <div id="chart-container"></div>
+          <div id="micro-chart-container" style="width:100%; height:100px; display:none; border-top: 1px solid rgba(255,255,255,0.06);"></div>
+          <button id="btn-chart-scroll-live" class="chart-scroll-live-btn" hidden title="Scroll to most recent bar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="13 17 18 12 13 7"></polyline>
+              <polyline points="6 17 11 12 6 7"></polyline>
+            </svg>
+            <span>Back to Live</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Column 2: tabbed tools (full height per tab) -->
+    <aside id="col-sidebar" class="sidebar-tabs" aria-label="Market tools">
+      <nav class="sidebar-tab-bar" role="tablist" aria-label="Sidebar views">
+        <button type="button" id="tab-live" class="sidebar-tab active" role="tab" aria-selected="true" aria-controls="pane-live" data-tab="live" title="Market sentiment and order book">Live</button>
+        <button type="button" id="tab-tape" class="sidebar-tab" role="tab" aria-selected="false" aria-controls="pane-tape" data-tab="tape" title="Live trade tape">Tape</button>
+        <button type="button" id="tab-insights" class="sidebar-tab" role="tab" aria-selected="false" aria-controls="pane-insights" data-tab="insights" title="Strategy signals and AI brief">Insights</button>
+        <button type="button" id="tab-alerts" class="sidebar-tab" role="tab" aria-selected="false" aria-controls="pane-alerts" data-tab="alerts" title="Strategy signals, fills, rejections">Alerts</button>
+        <button type="button" id="tab-scripts" class="sidebar-tab" role="tab" aria-selected="false" aria-controls="pane-scripts" data-tab="scripts" title="User-defined indicator scripts (NanoPine)">Scripts</button>
+      </nav>
+      <div class="sidebar-tab-panels">
+        <div class="sidebar-tab-pane is-active" role="tabpanel" data-tab-pane="live" id="pane-live" aria-labelledby="tab-live">
+          <div class="sidebar-live-stack">
+            <div class="panel sidebar-inner-panel" id="sentiment-panel">
+              <div class="panel-header">
+                <h2 class="panel-title">Market Sentiment</h2>
+                <span id="sentiment-label" class="sentiment-txt neutral">Neutral</span>
+              </div>
+              <div id="sentiment-gauge-wrap">
+                <div class="sentiment-axis" aria-hidden="true">
+                  <span class="sentiment-axis-ask">Ask</span>
+                  <span class="sentiment-axis-mid">0</span>
+                  <span class="sentiment-axis-bid">Bid</span>
+                </div>
+                <canvas id="sentiment-gauge"></canvas>
+                <div id="sentiment-pct" class="gauge-pct">0</div>
+                <div class="sentiment-skew-hint">Skew vs 50/50 book (top 10)</div>
+              </div>
+              <div class="vwap-row">
+                <span class="stat-label">1m VWAP</span>
+                <span id="vwap-val" class="stat-value mono-sm">—</span>
+                <span class="stat-label">Vol 1m</span>
+                <span id="vol-val" class="stat-value mono-sm">—</span>
+              </div>
+            </div>
+            <!-- ── Microstructure Panel ─────────────────────────────────────────────── -->
+            <div class="panel sidebar-inner-panel ms-panel" id="microstructure-panel">
+              <div class="panel-header">
+                <h2 class="panel-title">Microstructure</h2>
+                <span id="ms-verdict-badge" class="ms-obi-badge neutral">NEUTRAL</span>
+              </div>
+              <div class="ms-body">
+
+                <!-- TFI 30s -->
+                <div class="ms-row ms-row-tfi">
+                  <div class="ms-row-label">TFI 30s</div>
+                  <div class="ms-row-content" id="ms-tfi-30">
+                    <div class="ms-tfi-bar-wrap"><div class="ms-tfi-bar-fill buy" style="width:50%"></div></div>
+                    <div class="ms-tfi-labels"><span class="ms-tfi-buy mono-sm">—</span><span class="ms-tfi-net mono-sm">—</span><span class="ms-tfi-sell mono-sm">—</span></div>
+                  </div>
+                </div>
+
+                <!-- TFI 5s -->
+                <div class="ms-row ms-row-tfi">
+                  <div class="ms-row-label">TFI 5s</div>
+                  <div class="ms-row-content" id="ms-tfi-5">
+                    <div class="ms-tfi-bar-wrap"></div>
+                  </div>
+                </div>
+
+                <!-- OBI weighted -->
+                <div class="ms-row">
+                  <div class="ms-row-label">Wt. OBI</div>
+                  <div class="ms-row-content" id="ms-obi"></div>
+                </div>
+
+                <!-- Depth Pressure -->
+                <div class="ms-row">
+                  <div class="ms-row-label">Pressure</div>
+                  <div class="ms-row-content" id="ms-pressure"></div>
+                </div>
+
+                <!-- Spread -->
+                <div class="ms-row">
+                  <div class="ms-row-label">Spread</div>
+                  <div class="ms-row-content ms-spread-row" id="ms-spread"></div>
+                </div>
+
+                <!-- Realized Vol -->
+                <div class="ms-row ms-row-rv">
+                  <div class="ms-row-label">RV</div>
+                  <div class="ms-row-content ms-rv-row" id="ms-rv"></div>
+                </div>
+
+                <!-- Cancel -->
+                <div class="ms-row">
+                  <div class="ms-row-label">Cancel/s</div>
+                  <div class="ms-row-content" id="ms-cancel"></div>
+                </div>
+
+                <!-- Book Thinning -->
+                <div class="ms-row">
+                  <div class="ms-row-label">Bk Δ</div>
+                  <div class="ms-row-content" id="ms-thinning"></div>
+                </div>
+
+                <!-- Microprice -->
+                <div class="ms-row">
+                  <div class="ms-row-label">μPrice</div>
+                  <div class="ms-row-content" id="ms-microprice"></div>
+                </div>
+
+              </div>
+            </div>
+            <div class="panel sidebar-inner-panel" id="book-panel">
+              <div class="panel-header">
+                <h2 class="panel-title">Order Book</h2>
+                <span id="book-imbalance" class="imbalance-badge">—</span>
+              </div>
+              <div class="book-toolbar">
+                <span class="book-toolbar-title">Book</span>
+                <div class="book-precision-wrap" id="book-precision-wrap">
+                  <span class="visually-hidden" id="book-precision-a11y">Price group</span>
+                  <button
+                    type="button"
+                    id="book-precision-trigger"
+                    class="book-precision book-precision-trigger"
+                    aria-haspopup="listbox"
+                    aria-expanded="false"
+                    aria-controls="book-precision-menu"
+                    aria-labelledby="book-precision-a11y book-precision-label"
+                  >
+                    <span id="book-precision-label" class="book-precision-label">—</span>
+                    <span class="book-precision-chevron" aria-hidden="true"></span>
+                  </button>
+                  <div id="book-precision-menu" class="book-precision-menu" role="listbox" hidden></div>
+                </div>
+              </div>
+              <div class="book-mark-block">
+                <div id="book-mark-val" class="book-mark-val">—</div>
+                <div class="book-mark-sub">
+                  <span>Mark price</span>
+                  <span id="book-spread-inline" class="book-spread-inline"></span>
+                </div>
+              </div>
+              <div id="orderbook-scroll" class="orderbook-scroll">
+                <div class="book-grid-head" aria-hidden="true">
+                  <span class="gh-amt">Amt</span>
+                  <span class="gh-price bid">Bid</span>
+                  <span class="gh-price ask">Ask</span>
+                  <span class="gh-amt">Amt</span>
+                </div>
+                <div id="orderbook-mirrored" class="orderbook-mirrored"></div>
+              </div>
+              <div class="book-foot" role="toolbar" aria-label="Order book display">
+                <div class="book-seg" role="group" aria-label="Side filter">
+                  <button type="button" class="book-foot-btn is-on" data-book-filter="all">All</button>
+                  <button type="button" class="book-foot-btn" data-book-filter="bid">Bid</button>
+                  <button type="button" class="book-foot-btn" data-book-filter="ask">Ask</button>
+                </div>
+                <div class="book-seg" role="group" aria-label="Quantity column">
+                  <button type="button" class="book-foot-btn is-on" data-book-amt="vol">Vol</button>
+                  <button type="button" class="book-foot-btn" data-book-amt="depth">Depth</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="sidebar-tab-pane"
+          role="tabpanel"
+          data-tab-pane="tape"
+          id="pane-tape"
+          aria-labelledby="tab-tape"
+          aria-hidden="true"
+        >
+          <div class="sidebar-tape-stack">
+            <div class="panel sidebar-inner-panel" id="trades-panel">
+              <div class="panel-header">
+                <h2 class="panel-title">Trade Tape</h2>
+                <div class="tape-stats">
+                  <span class="stat-label">BUYS</span><span id="tape-buys" class="stat-value bull">0</span>
+                  <span class="stat-label">SELLS</span><span id="tape-sells" class="stat-value bear">0</span>
+                </div>
+              </div>
+              <div id="trades-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-tab-pane" role="tabpanel" data-tab-pane="insights" id="pane-insights" aria-labelledby="tab-insights">
+          <div class="sidebar-insights-stack">
+            <div class="panel sidebar-inner-panel" id="signals-panel">
+              <div class="panel-header">
+                <h2 class="panel-title">Strategy Signals</h2>
+                <span id="signal-verdict" class="verdict-badge neutral">NEUTRAL</span>
+              </div>
+              <div id="signals-content">
+                <div class="sig-row">
+                  <div class="sig-label" id="sig-htf-label">HTF Bias</div>
+                  <div id="sig-htf" class="sig-value neutral">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label" id="sig-trend-label">Trend</div>
+                  <div id="sig-ltf" class="sig-value neutral">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">Confidence</div>
+                  <div id="sig-conf" class="sig-value">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">Ref price (chart TF)</div>
+                  <div id="sig-ref-tf" class="sig-value dim mono-sm">—</div>
+                </div>
+                <div class="sig-section-header">Smart Money Concepts</div>
+                <div class="sig-row">
+                  <div class="sig-label">SMC Score</div>
+                  <div id="sig-smc-score" class="sig-value">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">Liquidity Sweep</div>
+                  <div id="sig-sweep" class="sig-value">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">Order Block</div>
+                  <div id="sig-ob" class="sig-value">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">FVG</div>
+                  <div id="sig-fvg" class="sig-value">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">BOS</div>
+                  <div id="sig-bos" class="sig-value">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">CHoCH</div>
+                  <div id="sig-choch" class="sig-value">—</div>
+                </div>
+                <div class="sig-section-header">MTF Stack (SOL)</div>
+                <div class="sig-row">
+                  <div class="sig-label">Direction</div>
+                  <div id="sig-mtf-dir" class="sig-value">—</div>
+                </div>
+                <div class="sig-row">
+                  <div class="sig-label">Pass</div>
+                  <div id="sig-mtf-pass" class="sig-value">—</div>
+                </div>
+                <div id="sig-mtf-reasons" class="reasons-list"></div>
+                <div class="sig-section-header" id="sig-matrix-header">Trend Matrix</div>
+                <div class="signals-matrix" id="signals-matrix">
+                  <div class="matrix-item" id="mat-ema"><span class="mat-label">EMA</span><span class="mat-val">—</span></div>
+                  <div class="matrix-item" id="mat-macd"><span class="mat-label">MACD</span><span class="mat-val">—</span></div>
+                  <div class="matrix-item" id="mat-rsi"><span class="mat-label">RSI</span><span class="mat-val">—</span></div>
+                  <div class="matrix-item" id="mat-st"><span class="mat-label">ST</span><span class="mat-val">—</span></div>
+                  <div class="matrix-item" id="mat-struct"><span class="mat-label">STRUCT</span><span class="mat-val">—</span></div>
+                  <div class="matrix-item" id="mat-vol"><span class="mat-label">VOL</span><span class="mat-val">—</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="panel sidebar-inner-panel" id="ai-brief-panel">
+              <div class="panel-header">
+                <h2 class="panel-title">AI Brief</h2>
+                <span id="ai-brief-status" class="mono-sm dim">—</span>
+              </div>
+              <div id="ai-brief-body" class="ai-brief-body ai-brief-prose">
+                <p class="ai-brief-setup">
+                  Enable <strong>AI_MARKET_BRIEF_ENABLED</strong> and <code>OLLAMA_MODEL</code> in <code>.env</code>.
+                  Use <strong>OLLAMA_TARGET</strong>=<code>local</code> (default) or <code>cloud</code> with <code>OLLAMA_API_KEY</code> when required.
+                </p>
+                <p class="ai-brief-muted"><em>Advisory only — not financial advice.</em></p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-tab-pane" role="tabpanel" data-tab-pane="alerts" id="pane-alerts" aria-labelledby="tab-alerts" aria-hidden="true">
+          <div class="panel sidebar-inner-panel">
+            <div class="panel-header">
+              <h2 class="panel-title">Strategy Alerts</h2>
+              <span id="alerts-count" class="muted" style="font-size:11px">0</span>
+            </div>
+            <div id="alerts-feed" class="alerts-feed" role="log" aria-live="polite" aria-label="Strategy alerts feed" style="font-family:'Roboto Mono',monospace;font-size:11px;max-height:520px;overflow-y:auto;padding:6px;"></div>
+          </div>
+        </div>
+        <div class="sidebar-tab-pane" role="tabpanel" data-tab-pane="scripts" id="pane-scripts" aria-labelledby="tab-scripts" aria-hidden="true">
+          <div class="sidebar-scripts-stack">
+            <div class="panel sidebar-inner-panel" id="scripts-panel">
+              <div class="panel-header">
+                <h2 class="panel-title">Scripts (NanoPine)</h2>
+                <span class="mono-sm dim" title="User-defined indicator scripts run client-side in a Web Worker.">v1</span>
+              </div>
+              <div id="nanopine-host" class="nanopine-host"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Terminal Settings Modal ────────────────────────────────────────── -->
+    <div id="chart-settings-modal" class="modal-backdrop" hidden aria-modal="true" role="dialog" aria-labelledby="modal-title">
+      <div class="modal-dialog panel settings-modal-lg">
+        <div class="modal-sidebar">
+          <div class="modal-sidebar-header">
+            <h2 id="modal-title" class="modal-title-sm">Settings</h2>
+          </div>
+          <nav class="modal-nav" role="tablist">
+            <button type="button" class="modal-nav-item active" role="tab" data-settings-tab="indicators" aria-selected="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+              <span>Indicators</span>
+            </button>
+            <button type="button" class="modal-nav-item" role="tab" data-settings-tab="risk" aria-selected="false">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+              <span>Risk & Sizing</span>
+            </button>
+            <button type="button" class="modal-nav-item" role="tab" data-settings-tab="system" aria-selected="false">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+              <span>System</span>
+            </button>
+          </nav>
+        </div>
+        <div class="modal-content-area">
+          <div class="modal-header-simple">
+            <h3 id="settings-tab-title" class="modal-content-title">Indicators & Overlays</h3>
+            <button type="button" id="btn-close-modal" class="modal-close-x" title="Close (Escape)">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+          </div>
+          
+          <!-- Tab 1: Indicators -->
+          <div id="tab-pane-indicators" class="settings-tab-pane active">
+            <div class="settings-group">
+              <h4 class="settings-group-title">Main Chart</h4>
+              <div class="settings-items-list">
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Moving Averages (EMA)</span>
+                    <span class="setting-desc">20, 50, and 200 period EMAs</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-ema" checked /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Supertrend (ST)</span>
+                    <span class="setting-desc">ATR-based trend (10, 3)</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-supertrend" checked /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Session VWAP</span>
+                    <span class="setting-desc">Volume-weighted average price (Midnight UTC)</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-vwap" /><span class="switch-slider"></span></div>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h4 class="settings-group-title">Sub-panes & Microstructure</h4>
+              <div class="settings-items-list">
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">RSI Panel</span>
+                    <span class="setting-desc">Relative Strength Index sub-pane (14 period)</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-rsi" /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Micro Candle Chart</span>
+                    <span class="setting-desc">5-second sub-pane at the bottom</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-micro" /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">TFI Lane</span>
+                    <span class="setting-desc">Trade Flow Imbalance histogram overlay</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-tfi" /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Spread Heatmap</span>
+                    <span class="setting-desc">Color volume bars based on current spread</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-spread-heatmap" /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Depth Pressure Line</span>
+                    <span class="setting-desc">Draw pressure zone lines from order book</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-depth-pressure" /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Weighted OBI Wick Tinting</span>
+                    <span class="setting-desc">Color wicks based on order book imbalance</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-obi-tint" /><span class="switch-slider"></span></div>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h4 class="settings-group-title">Chart Style & Scaling</h4>
+              <div class="settings-items-list">
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Logarithmic Scale</span>
+                    <span class="setting-desc">Toggle logarithmic price scaling on Y-axis</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-log-scale" /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Chart Watermark</span>
+                    <span class="setting-desc">Background watermark showing Symbol & Timeframe</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-watermark" checked /><span class="switch-slider"></span></div>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h4 class="settings-group-title">Order Book & Data</h4>
+              <div class="settings-items-list">
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Best Bid/Ask on Scale</span>
+                    <span class="setting-desc">Show real-time BBO on price axis</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-book-top" checked /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Liquidations</span>
+                    <span class="setting-desc">Markers for forced liquidation events</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-liquidations" checked /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Open Interest Regime</span>
+                    <span class="setting-desc">Track OI trend and reversal levels</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-oi-regime" checked /><span class="switch-slider"></span></div>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h4 class="settings-group-title">Institutional (SMC)</h4>
+              <div class="settings-items-list">
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">SMC Zones</span>
+                    <span class="setting-desc">Order Blocks, FVGs, and Liquidity Sweeps</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-smc-overlay" checked /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">kNN Architecture</span>
+                    <span class="setting-desc">Volume profiles and multi-TF structure</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-knn-overlay" checked /><span class="switch-slider"></span></div>
+                </label>
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Strategy HUD</span>
+                    <span class="setting-desc">Mini-dashboard directly on the chart</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-signal-hud" checked /><span class="switch-slider"></span></div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: Risk -->
+          <div id="tab-pane-risk" class="settings-tab-pane">
+            <div class="settings-group">
+              <h4 class="settings-group-title">Sizing & Leverage</h4>
+              <div class="settings-items-list">
+                <div class="setting-field-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Global Leverage</span>
+                    <span class="setting-desc">Max leverage allowed by RiskEngine</span>
+                  </div>
+                  <input type="text" class="setting-input-sm" id="conf-leverage" value="5x" readonly title="Managed via .env" />
+                </div>
+                <div class="setting-field-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Capital Per Trade</span>
+                    <span class="setting-desc">USDT margin used for new positions</span>
+                  </div>
+                  <input type="text" class="setting-input-sm" id="conf-capital" value="100 USDT" readonly title="Managed via .env" />
+                </div>
+              </div>
+            </div>
+            <div class="settings-group">
+              <h4 class="settings-group-title">Safety Limits</h4>
+              <div class="settings-items-list">
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Kill Switch</span>
+                    <span class="setting-desc">Halt all new entries immediately</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-kill-switch" /><span class="switch-slider"></span></div>
+                </label>
+                <div class="setting-field-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Max Symbols</span>
+                    <span class="setting-desc">Maximum concurrent open positions</span>
+                  </div>
+                  <input type="text" class="setting-input-sm" value="5" readonly />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 3: System -->
+          <div id="tab-pane-system" class="settings-tab-pane">
+            <div class="settings-group">
+              <h4 class="settings-group-title">Notifications</h4>
+              <div class="settings-items-list">
+                <label class="setting-row">
+                  <div class="setting-info">
+                    <span class="setting-label">Telegram Alerts</span>
+                    <span class="setting-desc">Enable professional AI-trader notifications</span>
+                  </div>
+                  <div class="toggle-switch"><input type="checkbox" id="toggle-telegram" checked disabled /><span class="switch-slider"></span></div>
+                </label>
+              </div>
+            </div>
+            <div class="settings-group">
+              <h4 class="settings-group-title">Engine Info</h4>
+              <div class="settings-items-list">
+                <div class="setting-info-row">
+                  <span class="info-label">Version</span>
+                  <span class="info-val">v0.1.0-alpha</span>
+                </div>
+                <div class="setting-info-row">
+                  <span class="info-label">Environment</span>
+                  <span id="sys-env-tag" class="info-val">Binance Hybrid Core</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

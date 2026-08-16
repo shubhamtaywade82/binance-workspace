@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./pnl-dashboard/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    # Host port 6380 (6379 typically already bound by a host-side redis-server).
+    # Bot reads REDIS_URL — point at whichever instance you want:
+    #   redis://localhost:6379  → host's redis (if you already run one)
+    #   redis://localhost:6380  → this docker container
+    ports:
+      - "6380:6379"
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./pnl-dashboard/prometheus.yml:/etc/prometheus/prometheus.yml
+      - promdata:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/trading.json
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./pnl-dashboard/grafana/provisioning:/etc/grafana/provisioning
+      - ./pnl-dashboard/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+
+  # MCP server bridging Binance + CoinDCX public market data to MCP clients
+  # (incl. the bot's in-app AI tool-calling loop). FastMCP `streamable-http`
+  # mounts under /mcp/ and does not expose a `/health` endpoint, so no
+  # healthcheck is configured. On the host bot: AI_MCP_ENABLED=true,
+  # AI_MCP_URL=http://localhost:4003 (or http://mcp-server:4003 from another container).
+  mcp-server:
+    build:
+      context: ./mcp-server
+    ports:
+      - "4003:4003"
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 4003
+      MCP_TRANSPORT: http
+      LOG_LEVEL: INFO
+    volumes:
+      - ./mcp-server/crypto_exchange_mcp.py:/app/crypto_exchange_mcp.py
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./pnl-dashboard
+      dockerfile: api/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./pnl-dashboard/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3002"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8001
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:
+  redisdata:
