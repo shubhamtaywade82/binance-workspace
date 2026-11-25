@@ -1,0 +1,4 @@
+{
+  "description": "Read-only Binance public ticker commands backed by Binance public REST market-data endpoints.",
+  "modules": ["./register.js"]
+}
