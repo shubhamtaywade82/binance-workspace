@@ -4,7 +4,7 @@ A read-only Claude Code plugin/mod for Binance public market data. It combines:
 
 - A real Claude Code mod (hooks/register.js) that registers /binance-quote and /binance-watchlist commands and fetches ticker data through Claude Code's host HTTP API.
 - A plugin-provided MCP server that reuses the workspace's public exchange MCP implementation for Spot and USD-M Futures REST data and bounded public WebSocket captures.
-- Focused skills for market overviews, OHLCV, order-book snapshots, public derivatives context and WebSocket captures.
+- Focused skills for market overviews, OHLCV, order-book snapshots, public derivatives context, WebSocket captures and a watchlist trend/bias report with a Telegram-alerting watch mode.
 
 It does not read account balances, positions, user-data streams, API keys or secrets. It does not submit, cancel or modify orders. There is no trading or execution tool in this mod's intended workflow.
 
@@ -57,6 +57,16 @@ The plugin uses a dedicated Binance-only FastMCP entry point. It reuses the shar
 Binance retired the legacy USD-M Futures /ws and /stream routes on 23 April 2026. The workspace MCP collector routes high-frequency @depth* and @bookTicker feeds to wss://fstream.binance.com/public, and regular market feeds such as @aggTrade, @markPrice, @kline_* and @forceOrder to wss://fstream.binance.com/market. A multi-stream request containing both categories uses two WebSocket connections for the same bounded duration. Spot routing is unchanged.
 
 This is a bounded capture utility, not a persistent stream processor. For a complete local order book, implement Binance's documented REST snapshot plus diff-depth sequence synchronization; do not infer a complete book from a short sample.
+
+## Watchlist bias and alerts
+
+    /binance-public:bias SOLUSDT,ETHUSDT,XRPUSDT
+
+Reports trend, long/short bias, support/resistance and what to avoid per symbol. For unattended alerts, run watch mode under /loop:
+
+    /loop 4h /binance-public:bias watch SOLUSDT,ETHUSDT,XRPUSDT
+
+It stores each symbol's 24h 4h-candle range in ~/.cache/binance-bias/state.json and messages Telegram only when a closed 4h candle closes outside it (once per break). Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the shell that launches Claude Code; without them alerts print in the terminal. /loop only runs while the Claude Code session is open; for 24/7 use cron with claude -p. Alerts are market-data context, not execution instructions.
 
 ## Security boundary
 

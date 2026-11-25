@@ -1,6 +1,6 @@
 {
   "name": "binance-public",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read-only Binance Spot and USD-M Futures market data for Claude Code: public REST quotes, market-data WebSocket snapshots, and evidence-based data workflows.",
   "author": { "name": "Nemesis OSS" }
 }
