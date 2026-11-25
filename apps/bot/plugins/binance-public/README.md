@@ -64,6 +64,8 @@ This is a bounded capture utility, not a persistent stream processor. For a comp
 
 A desk-style report per symbol: top-down 1D / 4H / 1H / 15m structure (BOS / CHoCH, protected highs and lows), SMC map (premium/discount, order blocks, fair value gaps, liquidity pools, sweeps, previous-day levels), price-action tags, open-interest regimes (price vs OI over 24h and 6h), funding, basis, top-trader ratio, taker flow, a 7-point confluence score and a scenario with POI, invalidation, targets and R:R. The math is done by scripts/analyze.mjs (tested, public Binance USD-M endpoints, no keys); the model only interprets the JSON. OB, FVG and sweep detection are mechanical heuristics, not a substitute for chart review.
 
+Memory: every report and every alert is appended to ~/.cache/binance-bias/journal.jsonl (an unchanged repeat within the hour is skipped). `/binance-public:bias review` replays 15m candles after each call and scores it: fill at the POI midpoint, stop vs first target (stop wins ties), MFE/MAE in R, expiry after 7 days, then win rate and average R by grade and symbol. Treat it as a feedback loop, not a backtest; it needs roughly 30 resolved calls before the numbers mean anything.
+
 Alerts: scripts/watch.mjs stores each symbol's 24h range (6 closed 4h candles) in ~/.cache/binance-bias/state.json and alerts only when a closed 4h candle closes outside it, once per break, with an HTF/OI/confluence context line. Messages go out as native Telegram entities built with @nemesis-oss/tg-format (bold symbol, monospace prices, localized candle-close time, no parse_mode). Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the shell that runs it; without them it prints the alert instead.
 
     /loop 4h /binance-public:bias watch SOLUSDT,ETHUSDT,XRPUSDT

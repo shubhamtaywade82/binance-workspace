@@ -6,6 +6,7 @@ import { dirname, join as joinPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bold, code, dateTime, fmt, italic, join, toTelegramPayload } from '@nemesis-oss/tg-format';
 import { analyzeSymbol, getJson } from './analyze.mjs';
+import { appendEntries, entryFrom } from './journal.mjs';
 import { parseKlines } from './smc.mjs';
 
 const STATE_PATH = process.env.BIAS_STATE ?? joinPath(homedir(), '.cache', 'binance-bias', 'state.json');
@@ -100,7 +101,8 @@ async function saveState(state) {
 
 async function addContext(alert) {
   try {
-    return { ...alert, context: contextLine(await analyzeSymbol(alert.symbol)) };
+    const analysis = await analyzeSymbol(alert.symbol);
+    return { ...alert, analysis, context: contextLine(analysis) };
   } catch {
     return alert; // context is a bonus; the break alert must still go out
   }
@@ -130,7 +132,9 @@ async function main() {
       if (status !== 200) process.exit(1); // keep old state so the next run re-alerts
     }
   }
-  if (!process.env.DRY) await saveState(state);
+  if (process.env.DRY) return;
+  await appendEntries(alerts.filter((a) => a.analysis).map((a) => entryFrom(a.analysis, 'watch', { trigger: a.kind }))).catch((e) => console.error(`journal not updated: ${e.message}`));
+  await saveState(state);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();

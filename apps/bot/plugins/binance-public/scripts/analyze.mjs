@@ -1,6 +1,8 @@
 // Multi-timeframe SMC / price-action / open-interest snapshot from Binance public USD-M endpoints.
-// Usage: node analyze.mjs SOLUSDT,ETHUSDT   -> one JSON array on stdout. Read-only, no API keys.
+// Usage: node analyze.mjs SOLUSDT,ETHUSDT [--no-log]  -> one JSON array on stdout; each call is journaled.
+// Read-only market data, no API keys.
 import { fileURLToPath } from 'node:url';
+import { appendEntries, entryFrom } from './journal.mjs';
 import {
   atr, dealingRange, fairValueGaps, liquidityPools, mtfBias, oiRegime, orderBlocks,
   parseKlines, priceAction, structure, sweeps, swings, takerBuyRatio,
@@ -162,6 +164,12 @@ async function main() {
   }
   const results = await Promise.all(symbols.map((s) => analyzeSymbol(s).catch((e) => ({ symbol: s, error: e.message }))));
   console.log(JSON.stringify(results));
+  if (process.argv.includes('--no-log')) return;
+  try {
+    await appendEntries(results.filter((r) => !r.error).map((r) => entryFrom(r, 'report')));
+  } catch (error) {
+    console.error(`journal not updated: ${error.message}`); // the report itself is already printed
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
