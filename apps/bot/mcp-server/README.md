@@ -123,7 +123,7 @@ Stream event casing is preserved (for example, `@aggTrade` and `@bookTicker`); o
 | Tool | Notes |
 | --- | --- |
 | `binance_ws_collect_stream` | Single stream; `duration_sec` clamped 1-60 |
-| `binance_ws_collect_multi_stream` | Combined `/stream?streams=` endpoint |
+| `binance_ws_collect_multi_stream` | Combined snapshot; USD-M splits `/public` and `/market` when needed |
 
 Example streams: `btcusdt@aggTrade`, `btcusdt@bookTicker`, `btcusdt@depth20@100ms`, `btcusdt@kline_5m`, `btcusdt@markPrice@1s`, `!forceOrder@arr`.
 
