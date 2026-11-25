@@ -1,5 +1,6 @@
 import pytest
 
+from crypto_exchange_mcp import WsMultiStreamInput, WsStreamInput
 from binance_ws_routing import (
     build_ws_urls,
     futures_route_for_stream,
@@ -88,3 +89,14 @@ def test_preserves_event_name_casing_and_normalizes_only_symbol():
     result = build_ws_urls("spot", ["BTCUSDT@aggTrade"])[0]
     assert result["streams"] == ["btcusdt@aggTrade"]
     assert result["url"] == "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+
+
+
+def test_websocket_tool_inputs_preserve_binance_event_name_case():
+    single = WsStreamInput(stream="BTCUSDT@aggTrade", market="futures")
+    multi = WsMultiStreamInput(
+        streams=["BTCUSDT@depth20@100ms", "ETHUSDT@bookTicker"],
+        market="futures",
+    )
+    assert single.stream == "btcusdt@aggTrade"
+    assert multi.streams == ["btcusdt@depth20@100ms", "ethusdt@bookTicker"]
