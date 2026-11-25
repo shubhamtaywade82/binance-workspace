@@ -11,7 +11,7 @@ It does not read account balances, positions, user-data streams, API keys or sec
 ## Requirements
 
 - Claude Code with Mods/plugin support (the plugin uses hooks.json modules and $.command.register).
-- Python 3.11+ and uv.
+- Python 3.11+ and uv (MCP server). Node 22+ (analysis and alert scripts).
 - Network access to Binance public market-data endpoints.
 
 No Binance API key or secret is required.
@@ -58,15 +58,21 @@ Binance retired the legacy USD-M Futures /ws and /stream routes on 23 April 2026
 
 This is a bounded capture utility, not a persistent stream processor. For a complete local order book, implement Binance's documented REST snapshot plus diff-depth sequence synchronization; do not infer a complete book from a short sample.
 
-## Watchlist bias and alerts
+## Watchlist analysis and alerts
 
     /binance-public:bias SOLUSDT,ETHUSDT,XRPUSDT
 
-Reports trend, long/short bias, support/resistance and what to avoid per symbol. For unattended alerts, run watch mode under /loop:
+A desk-style report per symbol: top-down 1D / 4H / 1H / 15m structure (BOS / CHoCH, protected highs and lows), SMC map (premium/discount, order blocks, fair value gaps, liquidity pools, sweeps, previous-day levels), price-action tags, open-interest regimes (price vs OI over 24h and 6h), funding, basis, top-trader ratio, taker flow, a 7-point confluence score and a scenario with POI, invalidation, targets and R:R. The math is done by scripts/analyze.mjs (tested, public Binance USD-M endpoints, no keys); the model only interprets the JSON. OB, FVG and sweep detection are mechanical heuristics, not a substitute for chart review.
+
+Alerts: scripts/watch.mjs stores each symbol's 24h range (6 closed 4h candles) in ~/.cache/binance-bias/state.json and alerts only when a closed 4h candle closes outside it, once per break, with an HTF/OI/confluence context line. Messages go out as native Telegram entities built with @nemesis-oss/tg-format (bold symbol, monospace prices, localized candle-close time, no parse_mode). Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the shell that runs it; without them it prints the alert instead.
 
     /loop 4h /binance-public:bias watch SOLUSDT,ETHUSDT,XRPUSDT
 
-It stores each symbol's 24h 4h-candle range in ~/.cache/binance-bias/state.json and messages Telegram only when a closed 4h candle closes outside it (once per break). Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the shell that launches Claude Code; without them alerts print in the terminal. /loop only runs while the Claude Code session is open; for 24/7 use cron with claude -p. Alerts are market-data context, not execution instructions.
+For 24/7 alerts without a Claude session or any LLM cost, run the script from a checkout via cron (needs Node 22+ and a one-time npm install in this folder):
+
+    5 */4 * * *  node /path/to/binance-workspace/apps/bot/plugins/binance-public/scripts/watch.mjs SOLUSDT,ETHUSDT,XRPUSDT
+
+Cloud scheduled tasks cannot reach the Binance futures API (HTTP 451); use the spot host data-api.binance.vision there. Alerts are market-data context, not execution instructions.
 
 ## Security boundary
 
@@ -78,9 +84,9 @@ It stores each symbol's 24h 4h-candle range in ~/.cache/binance-bias/state.json 
 
 ## Tests
 
-From the plugin directory:
+From the plugin directory (npm install once for the formatter dependency):
 
-    node --test hooks/register.test.js
+    npm test
 
 From apps/bot/mcp-server:
 

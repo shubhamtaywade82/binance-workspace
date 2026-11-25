@@ -1,9 +1,12 @@
 {
   "name": "@nemesis-oss/binance-public-claude-mod",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test hooks/register.test.js"
+    "test": "node --test hooks/register.test.js scripts/smc.test.mjs scripts/watch.test.mjs"
+  },
+  "dependencies": {
+    "@nemesis-oss/tg-format": "^0.1.0"
   }
 }
