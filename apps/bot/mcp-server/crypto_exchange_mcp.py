@@ -936,7 +936,9 @@ def _binance_ws_combined_url(market: Market, streams: list[str]) -> str:
 async def binance_ws_collect_stream(params: WsStreamInput, ctx: Context) -> str:
     """Connect to a single Binance WebSocket stream and collect messages for duration_sec.
 
-    Spot base: wss://stream.binance.com:9443. Futures base: wss://fstream.binance.com.
+    Spot streams use wss://stream.binance.com:9443.
+    USD-M Futures depth/bookTicker feeds use wss://fstream.binance.com/public;
+    regular market feeds (aggTrade, markPrice, klines, forceOrder) use /market.
     Example streams: 'btcusdt@aggTrade', 'btcusdt@bookTicker', 'btcusdt@depth20@100ms',
     'btcusdt@kline_5m', 'btcusdt@markPrice@1s', '!forceOrder@arr'.
 
@@ -955,7 +957,7 @@ async def binance_ws_collect_stream(params: WsStreamInput, ctx: Context) -> str:
 
 @mcp.tool(name="binance_ws_collect_multi_stream", annotations={**READ_ANNOTATIONS, "idempotentHint": False, "title": "Binance WS Multi-Stream Snapshot"})
 async def binance_ws_collect_multi_stream(params: WsMultiStreamInput, ctx: Context) -> str:
-    """Connect to the Binance combined-stream endpoint with multiple streams and collect messages."""
+    """Capture multiple public streams; mixed USD-M route groups use concurrent sockets."""
     try:
         groups = _binance_ws_urls(params.market, params.streams)
         batches = await asyncio.gather(
