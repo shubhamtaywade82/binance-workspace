@@ -22,7 +22,7 @@ From the binance-workspace repository root:
 
     claude --plugin-dir ./apps/bot/plugins/binance-public
 
-The plugin's .mcp.json launches the existing apps/bot/mcp-server/crypto_exchange_mcp.py with uv run --project, so Python dependencies are resolved from that server's pyproject.toml.
+The plugin's .mcp.json launches apps/bot/mcp-server/binance_public_mcp.py with uv run --project, so Python dependencies are resolved from the existing MCP server's pyproject.toml. This entry point reuses the existing Binance handlers but registers only the Binance public tool allowlist.
 
 For a permanent install, publish this folder through a trusted Claude Code plugin marketplace and install it from that marketplace. Keep the relative path to apps/bot/mcp-server intact, or update .mcp.json if you move the plugin.
 
@@ -48,7 +48,7 @@ The plugin MCP server name is binance-public. Binance tools currently provided b
 | Futures context | binance_futures_premium_index, binance_futures_funding_rate_history, binance_futures_open_interest, binance_futures_open_interest_hist, binance_futures_top_long_short_ratio |
 | WebSocket capture | binance_ws_collect_stream, binance_ws_collect_multi_stream |
 
-The reused crypto_exchange_mcp.py server also registers CoinDCX public-data and cross-exchange tools. The included skills use only the Binance tool names above. The server remains read-only and does not sign requests or expose account endpoints.
+The plugin uses a dedicated Binance-only FastMCP entry point. It reuses the shared REST/WebSocket handlers but registers only the 17 Binance public-data tools listed above; CoinDCX and cross-exchange tools are not exposed through this plugin.
 
 ## WebSocket routing
 
@@ -72,4 +72,4 @@ From the plugin directory:
 
 From apps/bot/mcp-server:
 
-    python -m pytest tests/test_binance_ws_routing.py -q
+    python -m pytest tests/test_binance_ws_routing.py tests/test_binance_public_mcp.py -q
