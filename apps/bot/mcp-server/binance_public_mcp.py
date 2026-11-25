@@ -41,6 +41,8 @@ def register_binance_public_tools(server: Any, source: Any = exchange) -> tuple[
             **dict(source.READ_ANNOTATIONS),
             "title": name.replace("_", " ").title(),
         }
+        if name.startswith("binance_ws_"):
+            annotations["idempotentHint"] = False
         server.tool(name=name, annotations=annotations)(handler)
     return BINANCE_PUBLIC_TOOL_NAMES
 
