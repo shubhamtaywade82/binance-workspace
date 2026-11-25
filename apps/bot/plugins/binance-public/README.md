@@ -22,9 +22,11 @@ From the binance-workspace repository root:
 
     claude --plugin-dir ./apps/bot/plugins/binance-public
 
-The plugin's .mcp.json launches apps/bot/mcp-server/binance_public_mcp.py with uv run --project, so Python dependencies are resolved from the existing MCP server's pyproject.toml. This entry point reuses the existing Binance handlers but registers only the Binance public tool allowlist.
+## Install from marketplace
 
-For a permanent install, publish this folder through a trusted Claude Code plugin marketplace and install it from that marketplace. Keep the relative path to apps/bot/mcp-server intact, or update .mcp.json if you move the plugin.
+    /plugin install binance-public --marketplace shubhamtaywade82/binance-workspace
+
+The plugin's mcp-server entry is a symlink to apps/bot/mcp-server. Claude Code resolves it when copying the plugin into its cache, so the installed plugin carries the server source. The .mcp.json launches mcp-server/binance_public_mcp.py with uv run --project; dependencies resolve from the server's pyproject.toml and uv.lock. This entry point reuses the existing Binance handlers but registers only the Binance public tool allowlist.
 
 ## Commands
 

@@ -1,0 +1,12 @@
+{
+  "name": "binance-workspace",
+  "owner": { "name": "shubhamtaywade82" },
+  "description": "Claude Code plugins from binance-workspace.",
+  "plugins": [
+    {
+      "name": "binance-public",
+      "source": "./apps/bot/plugins/binance-public",
+      "description": "Read-only Binance Spot and USD-M Futures public market data for Claude Code."
+    }
+  ]
+}
