@@ -25,6 +25,7 @@ import websockets
 from starlette.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from binance_ws_routing import build_ws_urls, normalize_stream
 
 # region ---------- logging & constants ----------
 
@@ -610,10 +611,7 @@ class WsStreamInput(_Base):
     @field_validator("stream")
     @classmethod
     def _val(cls, v: str) -> str:
-        cleaned = v.strip().lower()
-        if not cleaned or " " in cleaned:
-            raise ValueError("stream must be a non-empty token without whitespace, e.g. 'btcusdt@aggTrade'")
-        return cleaned
+        return normalize_stream(v)
 
 
 class WsMultiStreamInput(_Base):
@@ -625,13 +623,7 @@ class WsMultiStreamInput(_Base):
     @field_validator("streams")
     @classmethod
     def _val(cls, v: list[str]) -> list[str]:
-        out = []
-        for s in v:
-            cleaned = s.strip().lower()
-            if not cleaned or " " in cleaned:
-                raise ValueError(f"invalid stream '{s}'")
-            out.append(cleaned)
-        return out
+        return [normalize_stream(stream) for stream in v]
 
 
 class CoinDcxTickerInput(_Base):
@@ -917,14 +909,27 @@ async def binance_futures_top_long_short_ratio(params: LongShortInput, ctx: Cont
 # region ---------- Binance WS tools ----------
 
 
+def _binance_ws_urls(market: Market, streams: list[str]) -> list[dict[str, object]]:
+    """Build correctly routed public WebSocket endpoints for the requested market."""
+    return build_ws_urls(
+        market.value,
+        streams,
+        spot_base=BINANCE_SPOT_WS,
+        futures_base=BINANCE_FUTURES_WS,
+    )
+
+
 def _binance_ws_url(market: Market, stream: str) -> str:
-    base = BINANCE_SPOT_WS if market == Market.SPOT else BINANCE_FUTURES_WS
-    return f"{base}/ws/{stream}"
+    """Resolve one raw stream to its Spot or current USD-M Futures route."""
+    return str(_binance_ws_urls(market, [stream])[0]["url"])
 
 
 def _binance_ws_combined_url(market: Market, streams: list[str]) -> str:
-    base = BINANCE_SPOT_WS if market == Market.SPOT else BINANCE_FUTURES_WS
-    return f"{base}/stream?streams=" + "/".join(streams)
+    """Resolve a same-route combined stream URL; mixed Futures routes must be split."""
+    groups = _binance_ws_urls(market, streams)
+    if len(groups) != 1:
+        raise ValueError("Mixed USD-M Futures stream routes require separate WebSocket connections.")
+    return str(groups[0]["url"])
 
 
 @mcp.tool(name="binance_ws_collect_stream", annotations={**READ_ANNOTATIONS, "idempotentHint": False, "title": "Binance WS Snapshot"})
@@ -952,10 +957,23 @@ async def binance_ws_collect_stream(params: WsStreamInput, ctx: Context) -> str:
 async def binance_ws_collect_multi_stream(params: WsMultiStreamInput, ctx: Context) -> str:
     """Connect to the Binance combined-stream endpoint with multiple streams and collect messages."""
     try:
-        url = _binance_ws_combined_url(params.market, params.streams)
-        msgs = await collect_binance_ws(url, params.duration_sec)
+        groups = _binance_ws_urls(params.market, params.streams)
+        batches = await asyncio.gather(
+            *(collect_binance_ws(str(group["url"]), params.duration_sec) for group in groups)
+        )
+        msgs = [message for batch in batches for message in batch]
         summary = _summarize_ws(msgs, params.duration_sec)
-        payload = {"streams": params.streams, "market": params.market.value, "summary": summary, "messages": _sample_messages(msgs)}
+        payload = {
+            "streams": params.streams,
+            "market": params.market.value,
+            "stream_groups": [
+                {"route": group["route"], "streams": group["streams"]}
+                for group in groups
+            ],
+            "endpoint_count": len(groups),
+            "summary": summary,
+            "messages": _sample_messages(msgs),
+        }
         return format_response(payload, params.response_format, title="WS Multi-Stream Snapshot")
     except Exception as e:
         return handle_exchange_error(e)
