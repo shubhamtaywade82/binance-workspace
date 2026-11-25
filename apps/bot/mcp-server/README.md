@@ -175,4 +175,4 @@ All tools accept `response_format: "json"` (default) or `"markdown"`.
 
 - Binance JSON error bodies (`{code,msg}`) are surfaced verbatim. 429/418 are flagged as rate-limit hits.
 - CoinDCX 200-with-`status:error` payloads are converted to `RuntimeError` and reported as `Error: CoinDCX error: <msg>`.
-- WebSocket duration is clamped to `[1, 60]` seconds. High-rate captures return the first 500 + last 500 messages plus summary stats.
+- WebSocket duration is clamped to `[1, 60]` seconds. Binance captures return `max_messages` (default 20, max 1000) split between the start and end of the capture; summary stats cover every message.

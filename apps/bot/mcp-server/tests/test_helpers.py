@@ -22,6 +22,8 @@ from crypto_exchange_mcp import (
     normalize_coindcx_pair,
     normalize_symbol,
     validate_kline_interval,
+    WsStreamInput,
+    _sample_messages,
 )
 
 
@@ -149,3 +151,20 @@ def test_detect_coindcx_error_detects_status_field():
 def test_detect_coindcx_error_returns_none_on_success():
     assert detect_coindcx_error({"status": "ok", "data": []}) is None
     assert detect_coindcx_error([{"market": "BTCUSDT"}]) is None
+
+
+# ---- WebSocket message sampling ----
+
+def test_sample_messages_keeps_first_and_last_halves_when_over_cap():
+    msgs = [{"i": i} for i in range(100)]
+    sampled = _sample_messages(msgs, 20)
+    assert [m["i"] for m in sampled] == list(range(10)) + list(range(90, 100))
+
+
+def test_ws_stream_input_defaults_to_small_message_cap():
+    assert WsStreamInput(stream="btcusdt@aggTrade").max_messages == 20
+
+
+def test_ws_stream_input_rejects_cap_that_would_return_everything():
+    with pytest.raises(ValueError):
+        WsStreamInput(stream="btcusdt@aggTrade", max_messages=1)

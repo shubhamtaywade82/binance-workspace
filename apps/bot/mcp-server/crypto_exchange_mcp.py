@@ -60,6 +60,8 @@ VALID_OI_PERIODS = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
 MAX_WS_DURATION_SEC = 60.0
 MIN_WS_DURATION_SEC = 1.0
 MAX_WS_MESSAGES_RETURNED = 1000
+# Each message costs LLM context tokens (depth20 ~3 KB); summary stats still cover the full capture.
+DEFAULT_WS_MESSAGES_RETURNED = 20
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,30}$")
 COINDCX_PAIR_RE = re.compile(r"^[A-Z]{1,3}-[A-Z0-9]{2,15}_[A-Z0-9]{2,15}$")
 
@@ -606,6 +608,7 @@ class WsStreamInput(_Base):
     stream: str = Field(..., description="Binance stream name, e.g. 'btcusdt@aggTrade'", min_length=3, max_length=100)
     duration_sec: float = Field(default=5.0, ge=MIN_WS_DURATION_SEC, le=MAX_WS_DURATION_SEC)
     market: Market = Field(default=Market.SPOT)
+    max_messages: int = Field(default=DEFAULT_WS_MESSAGES_RETURNED, ge=2, le=MAX_WS_MESSAGES_RETURNED, description="Messages returned (first half + last half of capture)")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON)
 
     @field_validator("stream")
@@ -618,6 +621,7 @@ class WsMultiStreamInput(_Base):
     streams: list[str] = Field(..., description="List of Binance streams", min_length=1, max_length=20)
     duration_sec: float = Field(default=5.0, ge=MIN_WS_DURATION_SEC, le=MAX_WS_DURATION_SEC)
     market: Market = Field(default=Market.SPOT)
+    max_messages: int = Field(default=DEFAULT_WS_MESSAGES_RETURNED, ge=2, le=MAX_WS_MESSAGES_RETURNED, description="Messages returned (first half + last half of capture)")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON)
 
     @field_validator("streams")
@@ -942,14 +946,14 @@ async def binance_ws_collect_stream(params: WsStreamInput, ctx: Context) -> str:
     Example streams: 'btcusdt@aggTrade', 'btcusdt@bookTicker', 'btcusdt@depth20@100ms',
     'btcusdt@kline_5m', 'btcusdt@markPrice@1s', '!forceOrder@arr'.
 
-    Caps duration_sec to 60s. If >1000 messages are received, returns the first 500
-    and last 500 plus summary stats (count, msgs/sec, first/last timestamp).
+    Caps duration_sec to 60s. Returns at most max_messages (default 20, max 1000):
+    first half and last half of the capture, plus summary stats over all messages.
     """
     try:
         url = _binance_ws_url(params.market, params.stream)
         msgs = await collect_binance_ws(url, params.duration_sec)
         summary = _summarize_ws(msgs, params.duration_sec)
-        payload = {"stream": params.stream, "market": params.market.value, "summary": summary, "messages": _sample_messages(msgs)}
+        payload = {"stream": params.stream, "market": params.market.value, "summary": summary, "messages": _sample_messages(msgs, params.max_messages)}
         return format_response(payload, params.response_format, title=f"WS Snapshot {params.stream}")
     except Exception as e:
         return handle_exchange_error(e)
@@ -974,7 +978,7 @@ async def binance_ws_collect_multi_stream(params: WsMultiStreamInput, ctx: Conte
             ],
             "endpoint_count": len(groups),
             "summary": summary,
-            "messages": _sample_messages(msgs),
+            "messages": _sample_messages(msgs, params.max_messages),
         }
         return format_response(payload, params.response_format, title="WS Multi-Stream Snapshot")
     except Exception as e:

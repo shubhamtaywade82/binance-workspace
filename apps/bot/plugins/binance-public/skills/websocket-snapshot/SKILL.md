@@ -5,7 +5,7 @@ description: Capture short bounded snapshots from Binance public Spot or USD-M F
 
 # Binance public WebSocket snapshot
 
-Use binance_ws_collect_stream for one stream or binance_ws_collect_multi_stream for 1–20 streams. Set market to spot or futures explicitly and duration_sec between 1 and 60. Stream names must be lowercase for the symbol part; preserve Binance event casing, for example:
+Use binance_ws_collect_stream for one stream or binance_ws_collect_multi_stream for 1–20 streams. Set market to spot or futures explicitly and duration_sec between 1 and 60. Keep max_messages at its default of 20 unless the user needs raw messages; rely on the summary stats for rates and counts, since depth streams cost ~3 KB per message. Stream names must be lowercase for the symbol part; preserve Binance event casing, for example:
 
 - btcusdt@aggTrade
 - btcusdt@bookTicker
