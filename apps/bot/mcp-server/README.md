@@ -41,6 +41,14 @@ Optional dev with the inspector:
 
 ---
 
+## Binance-only MCP entry point
+
+The shared server also exposes CoinDCX and cross-exchange analytics. For consumers that require only Binance Spot/USD-M public market data, run the allowlisted entry point:
+
+    .venv/bin/python binance_public_mcp.py
+
+It reuses the Binance REST and bounded WebSocket handlers from crypto_exchange_mcp.py but registers only the 17 Binance public tools. It runs over stdio by default and does not register account, private user-stream, or trading tools. The Binance Public Claude Code plugin uses this entry point automatically.
+
 ## Register with Claude Code
 
 ```bash
