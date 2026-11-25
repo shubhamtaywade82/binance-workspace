@@ -33,3 +33,14 @@ def test_registers_only_the_explicit_public_tool_allowlist():
     assert registered == BINANCE_PUBLIC_TOOL_NAMES
     assert tuple(server.tools) == BINANCE_PUBLIC_TOOL_NAMES
     assert all(item["annotations"]["readOnlyHint"] is True for item in server.tools.values())
+
+def test_websocket_tools_are_marked_non_idempotent():
+    source = SimpleNamespace(READ_ANNOTATIONS={"readOnlyHint": True})
+    for name in BINANCE_PUBLIC_TOOL_NAMES:
+        setattr(source, name, object())
+
+    server = FakeMcp()
+    register_binance_public_tools(server, source)
+
+    assert server.tools["binance_ws_collect_stream"]["annotations"]["idempotentHint"] is False
+    assert server.tools["binance_ws_collect_multi_stream"]["annotations"]["idempotentHint"] is False
