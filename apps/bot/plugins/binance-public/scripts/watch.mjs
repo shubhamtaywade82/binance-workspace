@@ -108,33 +108,55 @@ async function addContext(alert) {
   }
 }
 
-async function main() {
-  const symbols = (process.argv[2] ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
-  if (!symbols.length || symbols.length > MAX_SYMBOLS || !symbols.every((s) => SYMBOL_PATTERN.test(s))) {
-    console.error(`usage: watch.mjs SYMBOL[,SYMBOL...] (max ${MAX_SYMBOLS}, USDT pairs)`);
-    process.exit(2);
+export function parseSymbols(arg) {
+  const symbols = (arg ?? '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+  const valid = symbols.length > 0 && symbols.length <= MAX_SYMBOLS && symbols.every((s) => SYMBOL_PATTERN.test(s));
+  return valid ? symbols : null;
+}
+
+function printResults(results) {
+  for (const r of results.filter((x) => !ICON[x.kind])) {
+    console.log(r.kind === 'ERROR' ? `${r.symbol} ERROR ${r.detail}` : `${r.symbol} ${r.kind.toLowerCase()} range ${r.support}-${r.resistance}, no break`);
   }
+}
+
+/** Prints the alert and sends it when configured. false = delivery failed, caller must keep old state. */
+async function deliver(alerts) {
+  const payload = buildPayload(alerts);
+  console.log(payload.text);
+  if (process.env.DRY || !process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+    console.log('Telegram not sent: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in this process environment.');
+    return true;
+  }
+  const status = await sendTelegram(payload);
+  console.log(`Telegram HTTP ${status}`);
+  return status === 200;
+}
+
+/**
+ * One closed-4h check over all symbols. Idempotent: state advances only past candles already
+ * checked, so it is safe to call from cron, /loop or a WebSocket trigger. Never exits the process.
+ */
+export async function runCheck(symbols) {
   const state = await loadState();
   const nowMs = Date.now();
   const results = await Promise.all(symbols.map((s) => checkSymbol(s, state, nowMs).catch((e) => ({ symbol: s, kind: 'ERROR', detail: e.message }))));
-  for (const r of results.filter((x) => x.kind === 'SEEDED' || x.kind === 'QUIET' || x.kind === 'ERROR')) {
-    console.log(r.kind === 'ERROR' ? `${r.symbol} ERROR ${r.detail}` : `${r.symbol} ${r.kind.toLowerCase()} range ${r.support}-${r.resistance}, no break`);
-  }
+  printResults(results);
   const alerts = await Promise.all(results.filter((x) => ICON[x.kind]).map(addContext));
-  if (alerts.length) {
-    const payload = buildPayload(alerts);
-    console.log(payload.text);
-    const configured = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID && !process.env.DRY;
-    if (!configured) console.log('Telegram not sent: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the shell that launches Claude Code.');
-    else {
-      const status = await sendTelegram(payload);
-      console.log(`Telegram HTTP ${status}`);
-      if (status !== 200) process.exit(1); // keep old state so the next run re-alerts
-    }
-  }
-  if (process.env.DRY) return;
+  if (alerts.length && !(await deliver(alerts))) return { ok: false }; // old state kept so the next run re-alerts
+  if (process.env.DRY) return { ok: true };
   await appendEntries(alerts.filter((a) => a.analysis).map((a) => entryFrom(a.analysis, 'watch', { trigger: a.kind }))).catch((e) => console.error(`journal not updated: ${e.message}`));
   await saveState(state);
+  return { ok: true };
+}
+
+async function main() {
+  const symbols = parseSymbols(process.argv[2]);
+  if (!symbols) {
+    console.error(`usage: watch.mjs SYMBOL[,SYMBOL...] (max ${MAX_SYMBOLS}, USDT pairs)`);
+    process.exit(2);
+  }
+  if (!(await runCheck(symbols)).ok) process.exit(1);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
