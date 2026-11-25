@@ -110,6 +110,14 @@ The `coindcx_pair(asset, quote)` helper builds the `B-<ASSET>_<QUOTE>` form used
 | `binance_futures_open_interest_hist` | `/futures/data/openInterestHist` |
 | `binance_futures_top_long_short_ratio` | `/futures/data/topLongShortAccountRatio` |
 
+### USD-M Futures WebSocket routing (updated)
+
+USD-M Futures now routes public streams through separate endpoints: high-frequency order-book streams such as `@depth` / `@depth20` and `@bookTicker` use `wss://fstream.binance.com/public`; regular market feeds such as `@aggTrade`, `@markPrice`, `@kline_*` and `@forceOrder` use `wss://fstream.binance.com/market`. The legacy `/ws` and `/stream` Futures routes were retired on 2026-04-23.
+
+The MCP collector routes a single stream to its correct endpoint. For multi-stream requests it groups streams by endpoint and captures each group concurrently; a request mixing depth/book-ticker with regular market feeds therefore opens two connections. The output includes `stream_groups` and `endpoint_count`. Spot routing is unchanged.
+
+Stream event casing is preserved (for example, `@aggTrade` and `@bookTicker`); only the symbol part is normalized to lowercase. This prevents accidental changes to Binance's event names.
+
 ### Binance WebSocket (snapshot)
 
 | Tool | Notes |
