@@ -7,7 +7,7 @@
         "--project",
         "${CLAUDE_PLUGIN_ROOT}/../../mcp-server",
         "python",
-        "${CLAUDE_PLUGIN_ROOT}/../../mcp-server/crypto_exchange_mcp.py"
+        "${CLAUDE_PLUGIN_ROOT}/../../mcp-server/binance_public_mcp.py"
       ],
       "env": {
         "LOG_LEVEL": "WARNING",
