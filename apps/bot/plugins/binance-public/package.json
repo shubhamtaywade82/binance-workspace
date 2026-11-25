@@ -1,0 +1,9 @@
+{
+  "name": "@nemesis-oss/binance-public-claude-mod",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test hooks/register.test.js"
+  }
+}
