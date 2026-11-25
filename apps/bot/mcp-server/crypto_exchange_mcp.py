@@ -25,6 +25,7 @@ import websockets
 from starlette.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from binance_ws_routing import build_ws_urls, normalize_stream
 
 # region ---------- logging & constants ----------
 
@@ -59,6 +60,8 @@ VALID_OI_PERIODS = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
 MAX_WS_DURATION_SEC = 60.0
 MIN_WS_DURATION_SEC = 1.0
 MAX_WS_MESSAGES_RETURNED = 1000
+# Each message costs LLM context tokens (depth20 ~3 KB); summary stats still cover the full capture.
+DEFAULT_WS_MESSAGES_RETURNED = 20
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,30}$")
 COINDCX_PAIR_RE = re.compile(r"^[A-Z]{1,3}-[A-Z0-9]{2,15}_[A-Z0-9]{2,15}$")
 
@@ -605,33 +608,26 @@ class WsStreamInput(_Base):
     stream: str = Field(..., description="Binance stream name, e.g. 'btcusdt@aggTrade'", min_length=3, max_length=100)
     duration_sec: float = Field(default=5.0, ge=MIN_WS_DURATION_SEC, le=MAX_WS_DURATION_SEC)
     market: Market = Field(default=Market.SPOT)
+    max_messages: int = Field(default=DEFAULT_WS_MESSAGES_RETURNED, ge=2, le=MAX_WS_MESSAGES_RETURNED, description="Messages returned (first half + last half of capture)")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON)
 
     @field_validator("stream")
     @classmethod
     def _val(cls, v: str) -> str:
-        cleaned = v.strip().lower()
-        if not cleaned or " " in cleaned:
-            raise ValueError("stream must be a non-empty token without whitespace, e.g. 'btcusdt@aggTrade'")
-        return cleaned
+        return normalize_stream(v)
 
 
 class WsMultiStreamInput(_Base):
     streams: list[str] = Field(..., description="List of Binance streams", min_length=1, max_length=20)
     duration_sec: float = Field(default=5.0, ge=MIN_WS_DURATION_SEC, le=MAX_WS_DURATION_SEC)
     market: Market = Field(default=Market.SPOT)
+    max_messages: int = Field(default=DEFAULT_WS_MESSAGES_RETURNED, ge=2, le=MAX_WS_MESSAGES_RETURNED, description="Messages returned (first half + last half of capture)")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON)
 
     @field_validator("streams")
     @classmethod
     def _val(cls, v: list[str]) -> list[str]:
-        out = []
-        for s in v:
-            cleaned = s.strip().lower()
-            if not cleaned or " " in cleaned:
-                raise ValueError(f"invalid stream '{s}'")
-            out.append(cleaned)
-        return out
+        return [normalize_stream(stream) for stream in v]
 
 
 class CoinDcxTickerInput(_Base):
@@ -917,32 +913,47 @@ async def binance_futures_top_long_short_ratio(params: LongShortInput, ctx: Cont
 # region ---------- Binance WS tools ----------
 
 
+def _binance_ws_urls(market: Market, streams: list[str]) -> list[dict[str, object]]:
+    """Build correctly routed public WebSocket endpoints for the requested market."""
+    return build_ws_urls(
+        market.value,
+        streams,
+        spot_base=BINANCE_SPOT_WS,
+        futures_base=BINANCE_FUTURES_WS,
+    )
+
+
 def _binance_ws_url(market: Market, stream: str) -> str:
-    base = BINANCE_SPOT_WS if market == Market.SPOT else BINANCE_FUTURES_WS
-    return f"{base}/ws/{stream}"
+    """Resolve one raw stream to its Spot or current USD-M Futures route."""
+    return str(_binance_ws_urls(market, [stream])[0]["url"])
 
 
 def _binance_ws_combined_url(market: Market, streams: list[str]) -> str:
-    base = BINANCE_SPOT_WS if market == Market.SPOT else BINANCE_FUTURES_WS
-    return f"{base}/stream?streams=" + "/".join(streams)
+    """Resolve a same-route combined stream URL; mixed Futures routes must be split."""
+    groups = _binance_ws_urls(market, streams)
+    if len(groups) != 1:
+        raise ValueError("Mixed USD-M Futures stream routes require separate WebSocket connections.")
+    return str(groups[0]["url"])
 
 
 @mcp.tool(name="binance_ws_collect_stream", annotations={**READ_ANNOTATIONS, "idempotentHint": False, "title": "Binance WS Snapshot"})
 async def binance_ws_collect_stream(params: WsStreamInput, ctx: Context) -> str:
     """Connect to a single Binance WebSocket stream and collect messages for duration_sec.
 
-    Spot base: wss://stream.binance.com:9443. Futures base: wss://fstream.binance.com.
+    Spot streams use wss://stream.binance.com:9443.
+    USD-M Futures depth/bookTicker feeds use wss://fstream.binance.com/public;
+    regular market feeds (aggTrade, markPrice, klines, forceOrder) use /market.
     Example streams: 'btcusdt@aggTrade', 'btcusdt@bookTicker', 'btcusdt@depth20@100ms',
     'btcusdt@kline_5m', 'btcusdt@markPrice@1s', '!forceOrder@arr'.
 
-    Caps duration_sec to 60s. If >1000 messages are received, returns the first 500
-    and last 500 plus summary stats (count, msgs/sec, first/last timestamp).
+    Caps duration_sec to 60s. Returns at most max_messages (default 20, max 1000):
+    first half and last half of the capture, plus summary stats over all messages.
     """
     try:
         url = _binance_ws_url(params.market, params.stream)
         msgs = await collect_binance_ws(url, params.duration_sec)
         summary = _summarize_ws(msgs, params.duration_sec)
-        payload = {"stream": params.stream, "market": params.market.value, "summary": summary, "messages": _sample_messages(msgs)}
+        payload = {"stream": params.stream, "market": params.market.value, "summary": summary, "messages": _sample_messages(msgs, params.max_messages)}
         return format_response(payload, params.response_format, title=f"WS Snapshot {params.stream}")
     except Exception as e:
         return handle_exchange_error(e)
@@ -950,12 +961,25 @@ async def binance_ws_collect_stream(params: WsStreamInput, ctx: Context) -> str:
 
 @mcp.tool(name="binance_ws_collect_multi_stream", annotations={**READ_ANNOTATIONS, "idempotentHint": False, "title": "Binance WS Multi-Stream Snapshot"})
 async def binance_ws_collect_multi_stream(params: WsMultiStreamInput, ctx: Context) -> str:
-    """Connect to the Binance combined-stream endpoint with multiple streams and collect messages."""
+    """Capture multiple public streams; mixed USD-M route groups use concurrent sockets."""
     try:
-        url = _binance_ws_combined_url(params.market, params.streams)
-        msgs = await collect_binance_ws(url, params.duration_sec)
+        groups = _binance_ws_urls(params.market, params.streams)
+        batches = await asyncio.gather(
+            *(collect_binance_ws(str(group["url"]), params.duration_sec) for group in groups)
+        )
+        msgs = [message for batch in batches for message in batch]
         summary = _summarize_ws(msgs, params.duration_sec)
-        payload = {"streams": params.streams, "market": params.market.value, "summary": summary, "messages": _sample_messages(msgs)}
+        payload = {
+            "streams": params.streams,
+            "market": params.market.value,
+            "stream_groups": [
+                {"route": group["route"], "streams": group["streams"]}
+                for group in groups
+            ],
+            "endpoint_count": len(groups),
+            "summary": summary,
+            "messages": _sample_messages(msgs, params.max_messages),
+        }
         return format_response(payload, params.response_format, title="WS Multi-Stream Snapshot")
     except Exception as e:
         return handle_exchange_error(e)

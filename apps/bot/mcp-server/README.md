@@ -41,6 +41,14 @@ Optional dev with the inspector:
 
 ---
 
+## Binance-only MCP entry point
+
+The shared server also exposes CoinDCX and cross-exchange analytics. For consumers that require only Binance Spot/USD-M public market data, run the allowlisted entry point:
+
+    .venv/bin/python binance_public_mcp.py
+
+It reuses the Binance REST and bounded WebSocket handlers from crypto_exchange_mcp.py but registers only the 17 Binance public tools. It runs over stdio by default and does not register account, private user-stream, or trading tools. The Binance Public Claude Code plugin uses this entry point automatically.
+
 ## Register with Claude Code
 
 ```bash
@@ -110,12 +118,20 @@ The `coindcx_pair(asset, quote)` helper builds the `B-<ASSET>_<QUOTE>` form used
 | `binance_futures_open_interest_hist` | `/futures/data/openInterestHist` |
 | `binance_futures_top_long_short_ratio` | `/futures/data/topLongShortAccountRatio` |
 
+### USD-M Futures WebSocket routing (updated)
+
+USD-M Futures now routes public streams through separate endpoints: high-frequency order-book streams such as `@depth` / `@depth20` and `@bookTicker` use `wss://fstream.binance.com/public`; regular market feeds such as `@aggTrade`, `@markPrice`, `@kline_*` and `@forceOrder` use `wss://fstream.binance.com/market`. The legacy `/ws` and `/stream` Futures routes were retired on 2026-04-23.
+
+The MCP collector routes a single stream to its correct endpoint. For multi-stream requests it groups streams by endpoint and captures each group concurrently; a request mixing depth/book-ticker with regular market feeds therefore opens two connections. The output includes `stream_groups` and `endpoint_count`. Spot routing is unchanged.
+
+Stream event casing is preserved (for example, `@aggTrade` and `@bookTicker`); only the symbol part is normalized to lowercase. This prevents accidental changes to Binance's event names.
+
 ### Binance WebSocket (snapshot)
 
 | Tool | Notes |
 | --- | --- |
 | `binance_ws_collect_stream` | Single stream; `duration_sec` clamped 1-60 |
-| `binance_ws_collect_multi_stream` | Combined `/stream?streams=` endpoint |
+| `binance_ws_collect_multi_stream` | Combined snapshot; USD-M splits `/public` and `/market` when needed |
 
 Example streams: `btcusdt@aggTrade`, `btcusdt@bookTicker`, `btcusdt@depth20@100ms`, `btcusdt@kline_5m`, `btcusdt@markPrice@1s`, `!forceOrder@arr`.
 
@@ -159,4 +175,4 @@ All tools accept `response_format: "json"` (default) or `"markdown"`.
 
 - Binance JSON error bodies (`{code,msg}`) are surfaced verbatim. 429/418 are flagged as rate-limit hits.
 - CoinDCX 200-with-`status:error` payloads are converted to `RuntimeError` and reported as `Error: CoinDCX error: <msg>`.
-- WebSocket duration is clamped to `[1, 60]` seconds. High-rate captures return the first 500 + last 500 messages plus summary stats.
+- WebSocket duration is clamped to `[1, 60]` seconds. Binance captures return `max_messages` (default 20, max 1000) split between the start and end of the capture; summary stats cover every message.
