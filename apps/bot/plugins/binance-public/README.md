@@ -74,6 +74,23 @@ For 24/7 alerts without a Claude session or any LLM cost, run the script from a 
 
     5 */4 * * *  node /path/to/binance-workspace/apps/bot/plugins/binance-public/scripts/watch.mjs SOLUSDT,ETHUSDT,XRPUSDT
 
+### Event-driven alerts (always-on)
+
+    node scripts/stream.mjs SOLUSDT,ETHUSDT,XRPUSDT
+
+Instead of polling on a timer, this subscribes to Binance's 4h kline WebSocket and runs the same closed-candle check within seconds of each close (about 3s after, to let the candle finalize and to merge symbols that close together). The socket is only a trigger: range logic, state and dedupe stay in `runCheck`, so a missed message or a reconnect cannot lose or repeat an alert. It runs a catch-up check on every (re)connect, reconnects with backoff, treats 60s of silence as a dead socket, serializes checks, and retries a failed Telegram delivery after 30s, 60s and 120s. No LLM and no scheduled runs.
+
+It needs a process that stays up (your machine or a VPS), Node 22+, a one-time `npm install` in this folder, and the Telegram variables in its environment. Example systemd user unit (`~/.config/systemd/user/binance-bias.service`, then `systemctl --user enable --now binance-bias`):
+
+    [Service]
+    WorkingDirectory=%h/binance-workspace/apps/bot/plugins/binance-public
+    EnvironmentFile=%h/.config/binance-bias.env
+    ExecStart=/usr/bin/node scripts/stream.mjs SOLUSDT,ETHUSDT,XRPUSDT
+    Restart=always
+    RestartSec=10
+
+With pm2: `pm2 start scripts/stream.mjs --name binance-bias -- SOLUSDT,ETHUSDT,XRPUSDT`. Run exactly one watcher per state file: stop any `/loop`, cron entry or cloud scheduled task for the same symbols, or every break is sent twice.
+
 Cloud scheduled tasks cannot reach the Binance futures API (HTTP 451); use the spot host data-api.binance.vision there. Alerts are market-data context, not execution instructions.
 
 ## Security boundary

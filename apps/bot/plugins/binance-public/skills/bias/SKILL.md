@@ -59,4 +59,6 @@ Make sure the formatter dependency is installed once (idempotent), then run the 
 
 The script keeps each symbol's 24h 4h-candle range in `~/.cache/binance-bias/state.json`, alerts only when a closed 4h candle closes outside it (once per break, then the range is redrawn), adds the HTF/OI/confluence context line, journals the alert's analysis (source `watch`), and sends a native-entity Telegram message (via `@nemesis-oss/tg-format`: bold symbol, monospace prices, localized candle-close time; no `parse_mode`) when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set.
 
+For event-driven alerts (no polling, no LLM), the user can instead run `node "${CLAUDE_PLUGIN_ROOT}/scripts/stream.mjs" SYMBOLS` as a long-lived process (see the README); never run it and a `/loop` or cron watcher for the same symbols together.
+
 Relay its output. Never print the token or the Telegram URL. If it prints "Telegram not sent", tell the user once to export both variables in the shell that launches Claude Code. A non-200 Telegram status keeps the old state, so the next run re-alerts. On a break, offer a full report for that symbol.
